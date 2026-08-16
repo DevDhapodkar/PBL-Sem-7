@@ -6,10 +6,14 @@ from . import (
     detection,
     evaluate,
     fusion,
+    nagpur,
     pipeline,
     registration,
     visualize,
 )
+
+# acquire / detect_real / visualize_nagpur depend on optional geo packages
+# (rasterio, pyproj) — import lazily so the core pipeline works without them.
 
 __all__ = [
     "baseline",
@@ -17,6 +21,7 @@ __all__ = [
     "detection",
     "evaluate",
     "fusion",
+    "nagpur",
     "pipeline",
     "registration",
     "visualize",

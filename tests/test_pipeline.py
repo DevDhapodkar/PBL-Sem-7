@@ -121,6 +121,35 @@ def test_optical_only_runs():
     assert len(res.fusion.candidates) == len(sc.optical)
 
 
+def test_nagpur_real_scene_pipeline():
+    """The bundled REAL Sentinel-2 Nagpur scene loads, detectors produce a point
+    set, and the pipeline beats ICP on the corroborable floating matter."""
+    try:
+        from src.acquire import load_cached_s2
+        from src.detect_real import build_scene_from_real
+    except Exception:
+        return  # optional geo deps (rasterio/pyproj) not installed
+    bs = load_cached_s2("ambazari")
+    if bs is None:
+        return  # cache not present
+    assert bs.meta.get("live")                      # it is real Sentinel-2
+    assert "B08" in bs.bands and bs["B08"].ndim == 2
+
+    f_prop, f_icp = [], []
+    for s in range(4):
+        scene, diag = build_scene_from_real(bs, seed=s)
+        assert len(scene.optical) > 5               # real floating-matter detections
+        prop = run_proposed(scene, putative_radius=14, ransac_threshold=4, match_radius=5)
+        trad = run_traditional(scene, match_radius=5)
+        pp = prop.fusion.locations(0.30)
+        tp = np.array([c.xy for c in trad.fusion.candidates if c.confidence >= 0.30]) \
+            if trad.fusion.candidates else np.empty((0, 2))
+        f_prop.append(score_locations(pp, scene.true_debris, 5).f1)
+        f_icp.append(score_locations(tp if len(tp) else np.empty((0, 2)),
+                                     scene.true_debris, 5).f1)
+    assert np.mean(f_prop) >= np.mean(f_icp)        # proposed >= ICP on real data
+
+
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

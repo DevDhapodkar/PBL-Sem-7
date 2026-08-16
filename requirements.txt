@@ -2,5 +2,9 @@ numpy>=1.24
 scipy>=1.10
 matplotlib>=3.6
 streamlit>=1.30      # interactive dashboard (app.py)
+rasterio>=1.3        # read real Sentinel-2 COGs (public bucket) over Nagpur
+pyproj>=3.4          # lat/lon <-> UTM (tile 44QKJ) for the lake windows
+# optional, for live Sentinel-1 (SAR) via Google Earth Engine on your machine:
+# earthengine-api>=0.1
 # optional (only for the PIL-based figure size check in dev):
 # pillow>=9.0
