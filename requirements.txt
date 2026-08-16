@@ -1,5 +1,6 @@
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.6
+streamlit>=1.30      # interactive dashboard (app.py)
 # optional (only for the PIL-based figure size check in dev):
 # pillow>=9.0

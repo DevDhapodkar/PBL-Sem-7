@@ -37,13 +37,36 @@ The design principle the prototype follows (and the reason it is more than
 ## Quick start
 
 ```bash
-pip install -r requirements.txt        # numpy, scipy, matplotlib
-python run_demo.py                      # runs everything, writes results/
+pip install -r requirements.txt        # numpy, scipy, matplotlib, streamlit
+
+streamlit run app.py                    # ⭐ interactive dashboard (recommended)
+python run_demo.py                      # batch: runs everything, writes results/
 python tests/test_pipeline.py           # 8 unit/integration tests
 ```
 
 `run_demo.py` runs three methods on the same simulated scenes, prints a metrics
 table, and writes four figures + `results/metrics.json`.
+
+## Interactive dashboard (`app.py`)
+
+A Streamlit UI that runs the **real** pipeline (the same `src/` modules) live —
+ideal for the demo:
+
+* **Sidebar controls** — scene size, per-sensor detection probability, SAR/optical
+  clutter load, the residual mis-registration (scale/rotation/shift), the RANSAC
+  threshold, the CPD outlier weight `w`, the match radius, and the confidence
+  threshold `T`. Every change re-runs the pipeline.
+* **Live scorecard** — F1 / precision / recall of the proposed method with the
+  delta vs. the traditional ICP method, plus the cross-modal match count and the
+  `Q_reg` gate.
+* **Tabs** — *Registration* (before / ICP / RANSAC+CPD with per-stage read-out),
+  *Debris confidence* (confidence map + threshold effect), *Comparison* (metrics
+  table + PR curves + average precision), *Robustness* (clutter sweep on demand),
+  and *Method & novelty*.
+
+```bash
+streamlit run app.py        # then open the printed Local URL in a browser
+```
 
 ---
 
@@ -124,6 +147,7 @@ src/
   baseline.py          traditional (ICP) and optical-only baselines
   evaluate.py          precision / recall / F1, PR curves, average precision, best-F1
   visualize.py         all figures
+app.py                 interactive Streamlit dashboard (runs the real pipeline live)
 run_demo.py            end-to-end demo + benchmark
 tests/test_pipeline.py 8 unit/integration tests
 docs/

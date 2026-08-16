@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_registration(scene, proposed, traditional, path):
+def plot_registration(scene, proposed, traditional, path=None):
     """Two-panel: point sets before registration vs after (traditional & proposed)."""
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.2))
 
@@ -60,11 +60,12 @@ def plot_registration(scene, proposed, traditional, path):
         ax.set_aspect("equal", "box")
         ax.grid(alpha=0.2)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
+    if path is not None:
+        fig.savefig(path, dpi=130)
+    return fig
 
 
-def plot_confidence(scene, proposed, threshold, path):
+def plot_confidence(scene, proposed, threshold, path=None):
     """Confidence map: candidates coloured by C, ground truth overlaid."""
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
     truth = scene.true_debris
@@ -92,11 +93,12 @@ def plot_confidence(scene, proposed, threshold, path):
     ax.set_aspect("equal", "box")
     ax.grid(alpha=0.2)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
+    if path is not None:
+        fig.savefig(path, dpi=130)
+    return fig
 
 
-def plot_pr_curves(curves, path):
+def plot_pr_curves(curves, path=None):
     """Overlaid precision-recall curves. ``curves`` maps method -> (rec, prec, ap)."""
     fig, ax = plt.subplots(figsize=(7, 6))
     style = {"proposed": ("#2ca02c", "-", "RANSAC+CPD (proposed)"),
@@ -116,11 +118,12 @@ def plot_pr_curves(curves, path):
     ax.grid(alpha=0.25)
     ax.legend(loc="lower left", fontsize=9)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
+    if path is not None:
+        fig.savefig(path, dpi=130)
+    return fig
 
 
-def plot_robustness(sweep, path):
+def plot_robustness(sweep, path=None):
     """Precision & F1 vs increasing false-positive load, per method (2 panels)."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
     x = sweep["x"]
@@ -141,5 +144,6 @@ def plot_robustness(sweep, path):
         ax.legend(fontsize=8)
     fig.suptitle("Robustness to modality-specific clutter", fontsize=12)
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
+    if path is not None:
+        fig.savefig(path, dpi=130)
+    return fig
