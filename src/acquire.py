@@ -42,9 +42,15 @@ _S2_BANDS = ("B02", "B03", "B04", "B06", "B08", "B11")
 
 
 def _gdal_env():
-    """Configure GDAL /vsicurl to use the session proxy + CA and range reads."""
+    """Configure GDAL /vsicurl for fast range reads (proxy-aware).
+
+    Note: we deliberately do NOT set ``CPL_VSIL_CURL_ALLOWED_EXTENSIONS`` — it is a
+    process-global that would reject the Sentinel-1 ``.rtc.tiff`` assets (which
+    also carry a signed query string). ``GDAL_DISABLE_READDIR_ON_OPEN`` already
+    gives the range-read speed-up without that restriction.
+    """
     os.environ.setdefault("GDAL_HTTP_PROXY", os.environ.get("HTTPS_PROXY", ""))
-    os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+    os.environ.pop("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", None)
     os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
     os.environ.setdefault("VSI_CACHE", "TRUE")
 
@@ -337,17 +343,26 @@ def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
         raise RuntimeError("no recent Sentinel-1 RTC over this lake on PC.")
     item = items[0]
 
+    # Read the signed Planetary Computer blob assets. Scope GDAL options here and
+    # ensure no `.tif`-only extension restriction is active (S1 assets are
+    # `.rtc.tiff` with a signed query string).
+    os.environ.pop("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", None)
     dst_bands = {}
-    for pol in ("vv", "vh"):
-        if pol not in item.assets:
-            continue
-        with rasterio.open(item.assets[pol].href) as src:
-            dst = np.zeros((H, W), "float32")
-            reproject(source=rasterio.band(src, 1), destination=dst,
-                      src_transform=src.transform, src_crs=src.crs,
-                      dst_transform=ref.transform, dst_crs=ref.crs,
-                      resampling=Resampling.bilinear)
-            dst_bands[pol.upper()] = 10 * np.log10(np.clip(dst, 1e-5, None))  # dB
+    with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+                      CPL_VSIL_CURL_USE_HEAD="NO",
+                      GDAL_HTTP_MAX_RETRY="3", GDAL_HTTP_RETRY_DELAY="1"):
+        for pol in ("vv", "vh"):
+            if pol not in item.assets:
+                continue
+            with rasterio.open(item.assets[pol].href) as src:
+                dst = np.zeros((H, W), "float32")
+                reproject(source=rasterio.band(src, 1), destination=dst,
+                          src_transform=src.transform, src_crs=src.crs,
+                          dst_transform=ref.transform, dst_crs=ref.crs,
+                          resampling=Resampling.bilinear)
+                dst_bands[pol.upper()] = 10 * np.log10(np.clip(dst, 1e-5, None))  # dB
+    if not dst_bands:
+        raise RuntimeError("Sentinel-1 item had no VV/VH assets to read.")
     return BandStack(dst_bands, ref.transform, ref.crs,
                      meta={"source": "Sentinel-1 RTC (Planetary Computer)",
                            "date": str(item.datetime.date()),
