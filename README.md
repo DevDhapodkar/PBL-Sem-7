@@ -320,6 +320,36 @@ an honest prior-art plan in [`docs/NOVELTY.md`](docs/NOVELTY.md).
 
 ## 10. Quick start
 
+### Run on your machine — one command
+
+You need **Python 3.9+** installed ([python.org](https://www.python.org/downloads/);
+on Windows tick *"Add Python to PATH"*). Then:
+
+```bash
+git clone https://github.com/DevDhapodkar/PBL-Sem-7.git
+cd PBL-Sem-7
+git checkout claude/sentinel-debris-detection-m17syi
+```
+
+**macOS / Linux:**
+```bash
+./run.sh            # creates a venv, installs deps, launches the dashboard
+```
+
+**Windows** (double-click `run.bat`, or in Command Prompt):
+```bat
+run.bat
+```
+
+The launcher sets up an isolated virtual environment, installs everything on the
+first run (~1–2 min), and starts the dashboard. **Open the `Local URL` it prints —
+usually http://localhost:8501 — in your browser.** Press `Ctrl+C` to stop.
+
+Other modes: `./run.sh demo` (batch benchmark) · `./run.sh test` (tests)
+— on Windows, `run.bat demo` / `run.bat test`.
+
+### Manual (if you prefer)
+
 ```bash
 pip install -r requirements.txt          # numpy, scipy, matplotlib, streamlit, rasterio, pyproj
 
