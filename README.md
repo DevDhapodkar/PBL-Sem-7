@@ -344,6 +344,19 @@ an honest prior-art plan in [`docs/NOVELTY.md`](docs/NOVELTY.md).
 
 ## 10. Quick start
 
+### Zero-setup: run the fully-real S1×S2 overlay in Google Colab ⭐
+
+The easiest way to get the **fully-real Sentinel-1 × Sentinel-2** result (real SAR
+included) with no local install:
+
+**[▶ Open in Colab](https://colab.research.google.com/github/DevDhapodkar/PBL-Sem-7/blob/claude/sentinel-debris-detection-m17syi/notebooks/nagpur_debris_colab.ipynb)**
+ — then *Runtime → Run all*.
+
+Colab runs in Google's cloud, where the Sentinel data hosts (incl. Microsoft
+Planetary Computer for real Sentinel-1) are reachable, so it fetches the latest
+real S1 and the most-recent-clear real S2 over your chosen Nagpur lake and draws
+the drift-aware overlay — no credentials needed.
+
 ### Run on your machine — one command
 
 You need **Python 3.9+** installed ([python.org](https://www.python.org/downloads/);

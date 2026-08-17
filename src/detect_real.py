@@ -129,7 +129,10 @@ def detect_sar_backscatter(
     """CFAR-style backscatter-anomaly detector on real Sentinel-1 VV over water."""
     vv = bs_sar["VV"].astype("float32")
     local_med = ndi.median_filter(vv, size=win)
-    local_std = ndi.generic_filter(vv, np.std, size=win) + 1e-6
+    # fast local std via box filters: std = sqrt(E[x^2] - E[x]^2)
+    mean = ndi.uniform_filter(vv, size=win)
+    mean_sq = ndi.uniform_filter(vv * vv, size=win)
+    local_std = np.sqrt(np.clip(mean_sq - mean * mean, 0, None)) + 1e-6
     anomaly = water & (np.abs(vv - local_med) > k * local_std)
     strength = np.clip(np.abs(vv - local_med) / (k * local_std) - 1, 0, 1)
     return [Detection(xy, max(s, 0.05), True) for xy, s in _blobs(anomaly, strength)]

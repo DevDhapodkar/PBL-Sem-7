@@ -315,8 +315,17 @@ def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
 
     today = start or _dt.date.today()
     since = (today - _dt.timedelta(days=31 * months_back)).isoformat()
-    L, B_, R, T = ref.meta["utm_box"]
-    tr_inv = _to_lonlat_box(ref.crs, (L, B_, R, T))
+    if ref.transform is None:
+        raise RuntimeError("fetch_latest_s1_pc needs a georeferenced optical ref "
+                           "(use fetch_latest_clear_s2 / fetch_sentinel2, not the "
+                           "bundled cache).")
+    # UTM window from the reference grid (transform + shape)
+    H, W = ref.shape
+    t = ref.transform
+    L, T = t.c, t.f
+    R, B_ = L + W * t.a, T + H * t.e
+    box = (min(L, R), min(B_, T), max(L, R), max(B_, T))
+    tr_inv = _to_lonlat_box(ref.crs, box)
 
     cat = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
                       modifier=pc.sign_inplace)
@@ -328,7 +337,6 @@ def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
         raise RuntimeError("no recent Sentinel-1 RTC over this lake on PC.")
     item = items[0]
 
-    H, W = ref.shape
     dst_bands = {}
     for pol in ("vv", "vh"):
         if pol not in item.assets:
