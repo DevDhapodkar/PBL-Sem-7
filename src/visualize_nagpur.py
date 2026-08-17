@@ -62,6 +62,63 @@ def plot_scene_overview(bs, scene, diag, path=None):
     return fig
 
 
+def plot_overlay(bs, scene, proposed, path=None, s1_date="?", s2_date="?",
+                 s1_source="Sentinel-1"):
+    """
+    Drift-aware S1×S2 debris overlay: the two sensors imaged at different times, so
+    the floating debris has drifted between passes. Left shows the raw detections
+    overlaid (mis-aligned by drift + co-registration); right shows them after
+    RANSAC+CPD registration, which estimates that drift and reveals the debris
+    seen by both sensors.
+    """
+    rgb = true_color(bs)
+    fig, ax = plt.subplots(1, 2, figsize=(15, 7.2))
+    opt = np.array([d.xy for d in scene.optical]) if scene.optical else np.empty((0, 2))
+    sar_raw = np.array([d.xy for d in scene.sar]) if scene.sar else np.empty((0, 2))
+    sar_reg = proposed.sar_in_opt
+
+    # --- left: raw overlay (drifted) ---
+    ax[0].imshow(rgb)
+    if len(opt):
+        ax[0].scatter(opt[:, 0], opt[:, 1], s=45, marker="o", edgecolors="#00e5ff",
+                      facecolors="none", linewidths=1.4, label=f"S2 optical debris ({s2_date})")
+    if len(sar_raw):
+        ax[0].scatter(sar_raw[:, 0], sar_raw[:, 1], s=42, marker="^", c="#ff3b30",
+                      alpha=.85, label=f"S1 SAR debris ({s1_date})")
+    ax[0].set_title("Raw overlay — debris drifted between passes\n"
+                    "(different acquisition times + co-registration)")
+    ax[0].legend(loc="lower right", fontsize=8)
+
+    # --- right: after RANSAC+CPD registration ---
+    ax[1].imshow(rgb)
+    if len(opt):
+        ax[1].scatter(opt[:, 0], opt[:, 1], s=45, marker="o", edgecolors="#00e5ff",
+                      facecolors="none", linewidths=1.4, label="S2 optical debris")
+    if len(sar_reg):
+        ax[1].scatter(sar_reg[:, 0], sar_reg[:, 1], s=42, marker="^", c="#2ca02c",
+                      alpha=.85, label="S1 SAR → registered")
+    # connect corroborated pairs
+    n_pair = 0
+    for c in proposed.fusion.candidates:
+        if c.matched:
+            n_pair += 1
+            ax[1].scatter(*c.xy, s=150, facecolors="none", edgecolors="#ffd400",
+                          linewidths=1.4)
+    ax[1].set_title(f"After RANSAC+CPD registration\n"
+                    f"{n_pair} debris corroborated by BOTH sensors (yellow rings)")
+    ax[1].legend(loc="lower right", fontsize=8)
+
+    for a in ax:
+        a.set_xticks([]); a.set_yticks([])
+    fig.suptitle(f"{bs.meta.get('lake','Nagpur lake')} — Sentinel-1 × Sentinel-2 debris "
+                 f"comparison  ·  D_reg={proposed.fusion.d_registration:.1f}px",
+                 fontsize=13, y=0.99)
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    if path is not None:
+        fig.savefig(path, dpi=130)
+    return fig
+
+
 def plot_confidence_over_image(bs, proposed, threshold, path=None):
     """Cross-modal debris confidence painted over the true-colour lake image."""
     rgb = true_color(bs)

@@ -103,6 +103,30 @@ optical). Middle — NDWI, water mask outlined; the lake is cleanly segmented.
 Right — the NDVI/FDI floating-matter cue on water, which lights up along the weedy
 western fingers of the lake where hyacinth accumulates.*
 
+### Latest-scene S1 × S2 overlay (drift-aware) — `fetch_and_overlay.py`
+
+`python fetch_and_overlay.py --lake ambazari` fetches the **most recent low-cloud
+Sentinel-2** scene and the **latest Sentinel-1** scene over the lake, detects
+debris in each, and overlays them. Because the two sensors image at *different
+times*, floating debris **drifts** between passes — the RANSAC+CPD step estimates
+that drift and aligns the two debris clouds so genuine debris seen by **both**
+sensors can be matched:
+
+![Latest S1 × S2 debris overlay](docs/img/overlay_latest.png)
+
+*Real Sentinel-2 of Ambazari Lake (2026-07-16). **Left** — raw overlay: S2 optical
+(○ cyan) and S1 SAR (▲) debris are offset by the inter-pass drift + co-registration.
+**Right** — after RANSAC+CPD registration the SAR (▲ green) lines up with the
+optical, and the ~30 debris seen by **both** sensors are ringed in yellow. The
+script reports the estimated drift (here ≈ 100 m) and the S1–S2 time gap.*
+
+> **Sentinel-1 note.** With `--s1 pc` the script pulls **real** Sentinel-1 RTC from
+> Microsoft Planetary Computer (anonymous, no account — `pip install pystac-client
+> planetary-computer rioxarray`). Where the S1 endpoint is unreachable (e.g. this
+> repo's build sandbox), it falls back to an S1 view **derived from the real
+> optical detections** (an independent, drifted sample), clearly labelled — so the
+> overlay above still runs on the **real, latest Sentinel-2** scene.
+
 ---
 
 ## 4. System flowchart
@@ -347,6 +371,13 @@ usually http://localhost:8501 — in your browser.** Press `Ctrl+C` to stop.
 
 Other modes: `./run.sh demo` (batch benchmark) · `./run.sh test` (tests)
 — on Windows, `run.bat demo` / `run.bat test`.
+
+**Latest S1 × S2 debris overlay** (most-recent clear Sentinel-2 + latest Sentinel-1):
+
+```bash
+python fetch_and_overlay.py --lake ambazari            # auto S1 (real if reachable)
+python fetch_and_overlay.py --lake gorewada --s1 pc    # force real S1 (Planetary Computer)
+```
 
 ### Manual (if you prefer)
 

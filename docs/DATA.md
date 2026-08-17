@@ -41,7 +41,32 @@ blocked. `get_nagpur_s2(lake)` returns the cache if present, else fetches live.
 
 ---
 
-## 2. Sentinel-1 GRD (SAR) — Google Earth Engine ⚙️ needs one-time auth
+### Most-recent clear scene
+
+`fetch_latest_clear_s2(lake)` scans scenes backwards from today, reads the L2A
+**SCL** cloud-classification band over the lake, and returns the newest scene below
+a cloud threshold — the "most recent clear photo". Nagpur's July–September is
+monsoon (mostly cloudy), so the newest clear scene is often from the dry season.
+
+---
+
+## 2. Sentinel-1 GRD/RTC (SAR)
+
+### 2a. Microsoft Planetary Computer — ✅ anonymous, no account (recommended)
+
+`src/acquire.py::fetch_latest_s1_pc` searches the `sentinel-1-rtc` collection on
+Planetary Computer, signs the asset URLs anonymously with the free
+`planetary-computer` package, and warps VV/VH (γ⁰, dB) onto the optical grid.
+
+```bash
+pip install pystac-client planetary-computer rioxarray
+python fetch_and_overlay.py --lake ambazari --s1 pc     # real S1 × real S2 overlay
+```
+
+This is the portable, fully-live SAR route used by `fetch_and_overlay.py`; it is
+blocked only where the PC endpoint is denied by network policy.
+
+### 2b. Google Earth Engine — ⚙️ needs one-time auth
 
 Earth Engine serves analysis-ready, terrain-corrected S1 backscatter server-side —
 the most portable route for VV/VH over an AOI.

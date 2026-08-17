@@ -181,6 +181,83 @@ def fetch_sentinel2(
                            "lake": lake.name, "live": True})
 
 
+def fetch_latest_clear_s2(
+    lake: Lake,
+    max_cloud: float = 0.10,
+    months_back: int = 14,
+    bands: tuple[str, ...] = _S2_BANDS,
+    start=None,
+) -> BandStack:
+    """
+    Fetch the **most recent low-cloud** Sentinel-2 L2A scene over ``lake``.
+
+    Scans scenes backwards from ``start`` (default: today), reads the L2A **Scene
+    Classification (SCL)** band over the lake window, and returns the newest scene
+    whose cloud fraction (SCL ∈ {cloud-shadow, cloud-med, cloud-high, cirrus}) is
+    below ``max_cloud``. This is the "most recent clear photo" the debris plot uses.
+    """
+    import datetime as _dt
+
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import from_bounds
+    from pyproj import Transformer
+
+    _gdal_env()
+    tr = Transformer.from_crs("EPSG:4326", UTM_EPSG, always_xy=True)
+    cx, cy = tr.transform(lake.lon, lake.lat)
+    h = lake.half_m
+    box = (cx - h, cy - h, cx + h, cy + h)
+
+    today = start or _dt.date.today()
+    ym = [( (today.replace(day=1) - _dt.timedelta(days=31 * i)).year,
+            (today.replace(day=1) - _dt.timedelta(days=31 * i)).month )
+          for i in range(months_back)]
+    cand = []
+    for y, m in ym:
+        try:
+            cand += list_s2_scenes(y, m)
+        except Exception:
+            continue
+    cand = sorted(set(cand), key=lambda s: re.search(r"_(\d{8})_", s).group(1),
+                  reverse=True)
+
+    CLOUD = {3, 8, 9, 10}
+    chosen = None
+    for sc in cand:
+        try:
+            with rasterio.open(f"{S2_BUCKET}/{sc}SCL.tif") as ds:
+                scl = ds.read(1, window=from_bounds(*box, ds.transform))
+        except Exception:
+            continue
+        if scl.size == 0 or (scl > 0).mean() < 0.9:      # nodata / partial
+            continue
+        if np.isin(scl, list(CLOUD)).mean() <= max_cloud:
+            chosen = sc
+            break
+    if chosen is None:
+        raise RuntimeError(f"no clear (<{max_cloud:.0%} cloud) S2 scene for "
+                           f"{lake.name} in the last {months_back} months.")
+
+    out, ref_shape, ref_tr, ref_crs = {}, None, None, None
+    for b in bands:
+        with rasterio.open(f"{S2_BUCKET}/{chosen}{b}.tif") as ds:
+            win = from_bounds(*box, ds.transform)
+            if ref_shape is None:
+                arr = ds.read(1, window=win, out_dtype="float32")
+                ref_shape, ref_tr, ref_crs = arr.shape, ds.window_transform(win), str(ds.crs)
+            else:
+                arr = ds.read(1, window=win, out_dtype="float32",
+                              out_shape=ref_shape, resampling=Resampling.nearest)
+            out[b] = arr / 10000.0
+    date = re.search(r"_(\d{8})_", chosen).group(1)
+    return BandStack(out, ref_tr, ref_crs,
+                     meta={"source": "Sentinel-2 L2A (AWS sentinel-cogs)",
+                           "tile": S2_TILE, "scene": chosen.split("/")[-2],
+                           "date": f"{date[:4]}-{date[4:6]}-{date[6:]}",
+                           "lake": lake.name, "live": True, "utm_box": box})
+
+
 # ---------------------------------------------------------------------------
 # Sentinel-1 (SAR) — live via Google Earth Engine (needs user credentials)
 # ---------------------------------------------------------------------------
@@ -206,10 +283,73 @@ def fetch_sentinel1_ee(lake: Lake, start: str, end: str,
            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH")))
     img = col.median().select(["VV", "VH"]).clip(geom)
-    # Sample onto a grid; download as numpy via getDownloadURL / ee.data
     rect = geom.bounds().getInfo()["coordinates"]
     arr = ee.data.computePixels  # placeholder: user chooses export mechanism
     raise NotImplementedError(
         "Earth Engine S1 fetch: authenticate & initialise ee, then export the "
         "VV/VH median to numpy (ee.data.computePixels or getDownloadURL). "
         "This runs where Earth Engine is reachable; see docs/DATA.md.")
+
+
+def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
+                       start=None) -> BandStack:  # pragma: no cover (needs live PC)
+    """
+    Fetch the **latest** Sentinel-1 RTC (VV/VH, γ⁰) over ``lake`` from Microsoft
+    Planetary Computer, reprojected onto the optical grid ``ref``.
+
+    Planetary Computer allows **anonymous** access (no account) — asset URLs are
+    signed with the free ``planetary-computer`` package. This is the portable,
+    fully-live SAR path; it is blocked only in networks that deny the PC endpoint.
+
+        pip install pystac-client planetary-computer rioxarray odc-stac
+
+    ``ref`` is a Sentinel-2 ``BandStack`` (from ``fetch_latest_clear_s2``); the SAR
+    is warped to the same window/CRS/shape so the two modalities overlay directly.
+    """
+    import datetime as _dt
+
+    import planetary_computer as pc
+    import rasterio
+    from pystac_client import Client
+    from rasterio.warp import Resampling, reproject
+
+    today = start or _dt.date.today()
+    since = (today - _dt.timedelta(days=31 * months_back)).isoformat()
+    L, B_, R, T = ref.meta["utm_box"]
+    tr_inv = _to_lonlat_box(ref.crs, (L, B_, R, T))
+
+    cat = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
+                      modifier=pc.sign_inplace)
+    search = cat.search(collections=["sentinel-1-rtc"], bbox=tr_inv,
+                        datetime=f"{since}/{today.isoformat()}",
+                        sortby=[{"field": "datetime", "direction": "desc"}])
+    items = list(search.items())
+    if not items:
+        raise RuntimeError("no recent Sentinel-1 RTC over this lake on PC.")
+    item = items[0]
+
+    H, W = ref.shape
+    dst_bands = {}
+    for pol in ("vv", "vh"):
+        if pol not in item.assets:
+            continue
+        with rasterio.open(item.assets[pol].href) as src:
+            dst = np.zeros((H, W), "float32")
+            reproject(source=rasterio.band(src, 1), destination=dst,
+                      src_transform=src.transform, src_crs=src.crs,
+                      dst_transform=ref.transform, dst_crs=ref.crs,
+                      resampling=Resampling.bilinear)
+            dst_bands[pol.upper()] = 10 * np.log10(np.clip(dst, 1e-5, None))  # dB
+    return BandStack(dst_bands, ref.transform, ref.crs,
+                     meta={"source": "Sentinel-1 RTC (Planetary Computer)",
+                           "date": str(item.datetime.date()),
+                           "scene": item.id, "lake": lake.name, "live": True})
+
+
+def _to_lonlat_box(crs, box):
+    """UTM (left,bottom,right,top) -> lon/lat bbox for STAC search."""
+    from pyproj import Transformer
+    t = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    L, B_, R, T = box
+    xs, ys = t.transform([L, R, L, R], [B_, B_, T, T])
+    return [min(xs), min(ys), max(xs), max(ys)]

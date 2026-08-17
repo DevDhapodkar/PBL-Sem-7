@@ -68,12 +68,18 @@ st.sidebar.divider()
 # Cached compute
 # ===========================================================================
 @st.cache_data(show_spinner="Loading Sentinel data & running pipeline…")
-def compute_nagpur(lake_key, seed, match_radius):
+def compute_nagpur(lake_key, seed, match_radius, live_latest=False):
     from src.nagpur import get_lake
-    from src.acquire import get_nagpur_s2
+    from src.acquire import get_nagpur_s2, fetch_latest_clear_s2
     from src.detect_real import build_scene_from_real
     lake = get_lake(lake_key)
-    bs = get_nagpur_s2(lake)
+    if live_latest:
+        try:
+            bs = fetch_latest_clear_s2(lake)
+        except Exception:
+            bs = get_nagpur_s2(lake)
+    else:
+        bs = get_nagpur_s2(lake)
     scene, diag = build_scene_from_real(bs, seed=int(seed))
     proposed = run_proposed(scene, putative_radius=14, ransac_threshold=4.0,
                             match_radius=match_radius)
@@ -121,6 +127,10 @@ if mode.startswith("🛰️"):
         lake_key = st.selectbox("Nagpur water body", list(LAKES),
                                 format_func=lambda k: LAKES[k].name, index=0)
         st.caption(LAKES[lake_key].note)
+        live_latest = st.checkbox("Fetch most-recent clear scene (live)", value=False,
+                                  help="Live-fetch the newest low-cloud Sentinel-2 "
+                                       "scene from the public bucket (needs network). "
+                                       "Off = bundled real scene (offline).")
         st.header("🛰️ Sentinel-1 pairing")
         st.caption("Live S1 needs Earth-Engine credentials; here the SAR view is "
                    "derived from the real optical scene (see *Method & data*).")
@@ -131,7 +141,8 @@ if mode.startswith("🛰️"):
         st.divider()
         st.caption("Real Sentinel-2 L2A · tile 44QKJ · Jan-2024 · AWS `sentinel-cogs`.")
 
-    bs, scene, diag, proposed, traditional = compute_nagpur(lake_key, seed, match_radius)
+    bs, scene, diag, proposed, traditional = compute_nagpur(lake_key, seed, match_radius,
+                                                            live_latest)
     rows, scored = render_metrics(scene, proposed, traditional, match_radius,
                                   conf_thr, 0.0, report_all_optical=True)
     m_prop, m_trad, m_opt = rows["proposed"], rows["traditional_icp"], rows["optical_only"]
@@ -148,15 +159,32 @@ if mode.startswith("🛰️"):
                f"paired Sentinel-1 detections: **{len(scene.sar)}** · "
                f"corroborable (both sensors) ground truth: **{len(scene.true_debris)}**.")
 
-    t_scene, t_reg, t_conf, t_cmp, t_about = st.tabs(
-        ["🌊 Lake & detections", "🧭 Registration", "🎯 Debris confidence",
-         "📊 Comparison", "📄 Method & data"])
+    t_scene, t_overlay, t_reg, t_conf, t_cmp, t_about = st.tabs(
+        ["🌊 Lake & detections", "🛰️ S1×S2 overlay", "🧭 Registration",
+         "🎯 Debris confidence", "📊 Comparison", "📄 Method & data"])
 
     with t_scene:
         st.pyplot(vn.plot_scene_overview(bs, scene, diag), width='stretch')
         st.caption("Left: Sentinel-2 true colour with S1 (▲) and S2 (○) detections. "
                    "Middle: NDWI with the water mask outlined. Right: NDVI/FDI "
                    "floating-matter cue on water (hyacinth / scum / trash).")
+
+    with t_overlay:
+        st.pyplot(vn.plot_overlay(bs, scene, proposed,
+                                  s1_date=diag.get("meta", {}).get("date", "SAR pass"),
+                                  s2_date=bs.meta.get("date", "?")), width='stretch')
+        drift_px = float(np.hypot(*proposed.T_final[:2, 2]))
+        c = st.columns(3)
+        c[0].metric("Estimated drift / offset", f"~{drift_px*10:.0f} m",
+                    "S1↔S2 debris cloud")
+        c[1].metric("Registration error D_reg", f"{proposed.fusion.d_registration:.1f} px")
+        c[2].metric("Corroborated by both", proposed.fusion.n_matches)
+        st.caption("Sentinel-1 and Sentinel-2 image at different times, so floating "
+                   "debris **drifts** between passes. **Left** overlays the raw "
+                   "detections (offset by drift + co-registration); **right** shows "
+                   "them after RANSAC+CPD registration — yellow rings mark debris "
+                   "seen by **both** sensors. Run `fetch_and_overlay.py` for the "
+                   "latest-S1 × latest-clear-S2 version from the command line.")
 
     with t_reg:
         c1, c2 = st.columns([3, 1])
