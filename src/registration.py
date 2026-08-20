@@ -163,6 +163,12 @@ class RansacResult:
     success: bool
 
 
+def _translation_T(t: np.ndarray) -> np.ndarray:
+    T = np.eye(3)
+    T[:2, 2] = t
+    return T
+
+
 def ransac_similarity(
     src_pts: np.ndarray,
     dst_pts: np.ndarray,
@@ -171,17 +177,27 @@ def ransac_similarity(
     max_iter: int = 2000,
     min_inliers: int = 4,
     seed: int | None = 0,
+    model: str = "similarity",
+    max_translation: float | None = None,
 ) -> RansacResult:
     """
-    RANSAC over putative correspondences to estimate a robust similarity
-    transform mapping ``src_pts`` onto ``dst_pts`` and to reject outlier
-    correspondences.
+    RANSAC over putative correspondences to estimate a robust transform mapping
+    ``src_pts`` onto ``dst_pts`` and to reject outlier correspondences.
 
-    * ``matches``   : (M, 2) putative index pairs (src_idx, dst_idx).
-    * ``threshold`` : inlier residual (in dst units) after transform.
+    * ``matches``        : (M, 2) putative index pairs (src_idx, dst_idx).
+    * ``threshold``      : inlier residual (in dst units) after transform.
+    * ``model``          : ``"similarity"`` (scale+rotation+translation, needs 2
+                           correspondences) or ``"translation"`` (offset only,
+                           needs 1) -- the latter is the correct model for two
+                           already-geocoded point sets (real S1/S2), where a free
+                           rotation/scale would over-fit sparse detections.
+    * ``max_translation``: if set, reject any hypothesis whose translation exceeds
+                           this magnitude (a physical bound on the residual
+                           co-registration + inter-pass debris drift).
     """
     rng = np.random.default_rng(seed)
-    if len(matches) < 2:
+    sample = 1 if model == "translation" else 2
+    if len(matches) < sample:
         return RansacResult(np.eye(3), np.zeros(len(matches), bool), 0, False)
 
     src = src_pts[matches[:, 0]]
@@ -190,11 +206,18 @@ def ransac_similarity(
     best_count = 0
     n = len(matches)
 
+    def _fit(sel):
+        if model == "translation":
+            return _translation_T((dst[sel] - src[sel]).mean(0))
+        return estimate_similarity(src[sel], dst[sel])
+
     for _ in range(max_iter):
-        idx = rng.choice(n, size=2, replace=False)   # 2 pairs define a similarity
+        idx = rng.choice(n, size=sample, replace=False)
         try:
-            T = estimate_similarity(src[idx], dst[idx])
+            T = _fit(idx)
         except np.linalg.LinAlgError:
+            continue
+        if max_translation is not None and np.hypot(*T[:2, 2]) > max_translation:
             continue
         resid = np.linalg.norm(apply_transform(T, src) - dst, axis=1)
         inliers = resid < threshold
@@ -204,7 +227,7 @@ def ransac_similarity(
 
     success = best_count >= min_inliers
     if success:                                       # refit on all inliers
-        T = estimate_similarity(src[best_inliers], dst[best_inliers])
+        T = _fit(np.where(best_inliers)[0])
     else:
         T = np.eye(3)
     return RansacResult(T, best_inliers, best_count, success)
@@ -230,6 +253,7 @@ def cpd_rigid(
     max_iter: int = 100,
     tol: float = 1e-6,
     allow_scale: bool = True,
+    allow_rotation: bool = True,
 ) -> CpdResult:
     """
     Rigid (optionally + isotropic scale) Coherent Point Drift.
@@ -242,6 +266,12 @@ def cpd_rigid(
     ``init_T`` (from RANSAC) pre-aligns the source so CPD starts inside the basin
     of attraction of the correct solution. The returned ``T`` is the *composition*
     of ``init_T`` with the refinement CPD estimates.
+
+    Set ``allow_rotation=False`` (and ``allow_scale=False``) for **translation-only**
+    CPD -- the correct model when the two point sets are already geocoded (real
+    Sentinel-1/Sentinel-2), where the only residual is a small co-registration
+    offset plus bounded debris drift, and a free rotation/scale would over-fit
+    sparse detections.
     """
     X = np.asarray(target, float)     # N x 2
     init_T = np.eye(3) if init_T is None else init_T
@@ -270,19 +300,23 @@ def cpd_rigid(
             break
 
         # ---- M-step : closed-form rigid(+scale) update ----------------------
-        mu_x = (P @ X).sum(0) / Np           # actually (P^T 1)^T X / Np
         mu_x = (X * P.sum(0)[:, None]).sum(0) / Np
         mu_y = (Y * P.sum(1)[:, None]).sum(0) / Np
         Xc = X - mu_x
         Yc = Y - mu_y
-        A = Xc.T @ (P.T @ Yc)                 # D x D
-        U, Dsv, Vt = np.linalg.svd(A)
-        C = np.eye(D)
-        C[-1, -1] = np.sign(np.linalg.det(U @ Vt))
-        R = U @ C @ Vt
-        if allow_scale:
-            YPY = np.sum(P.sum(1) * np.sum(Yc ** 2, axis=1))
-            s = np.trace(np.diag(Dsv) @ C) / (YPY + 1e-12)
+        if allow_rotation:
+            A = Xc.T @ (P.T @ Yc)             # D x D
+            U, Dsv, Vt = np.linalg.svd(A)
+            C = np.eye(D)
+            C[-1, -1] = np.sign(np.linalg.det(U @ Vt))
+            R = U @ C @ Vt
+            if allow_scale:
+                YPY = np.sum(P.sum(1) * np.sum(Yc ** 2, axis=1))
+                s = np.trace(np.diag(Dsv) @ C) / (YPY + 1e-12)
+        else:
+            # translation-only: R = I, s = 1; only the offset moves
+            R, s = np.eye(D), 1.0
+            Dsv, C = np.zeros(D), np.eye(D)
         t = mu_x - s * R @ mu_y
         TY = s * (Y @ R.T) + t
 

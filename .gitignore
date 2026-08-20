@@ -6,3 +6,5 @@ venv/
 .venv/
 *.egg-info/
 .DS_Store
+# runtime, day-scoped Sentinel-1 scene-discovery cache (see src/acquire.py)
+data/_s1_aws_index.json

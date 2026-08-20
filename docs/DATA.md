@@ -52,7 +52,44 @@ monsoon (mostly cloudy), so the newest clear scene is often from the dry season.
 
 ## 2. Sentinel-1 GRD/RTC (SAR)
 
-### 2a. Microsoft Planetary Computer — ✅ anonymous, no account (recommended)
+### 2a. Public AWS GRD bucket — ✅ anonymous, no account, no STAC (recommended)
+
+`src/acquire.py::fetch_latest_s1_aws` reads real Sentinel-1 **GRD** VV/VH straight
+from the AWS Open-Data bucket **`sentinel-s1-l1c`** (`s3://sentinel-s1-l1c`, the
+Sinergise mirror). This is the most **reachable** real-S1 route: unlike the S1
+discovery APIs (Copernicus Data Space, Earth Engine, Planetary Computer, ASF,
+Earth Search — all HTTPS services an egress policy can block), this bucket is a
+bare S3 store, reachable wherever the Sentinel-2 COG bucket is, and its VV/VH
+measurement GeoTIFFs are anonymously readable over HTTP range requests.
+
+```bash
+pip install rasterio pyproj            # already in requirements.txt — nothing extra
+python fetch_and_overlay.py --lake ambazari --s1 aws   # fully-real S1 × S2 overlay
+```
+
+How it works (no spatial index needed — the bucket is partitioned only by date,
+`GRD/<Y>/<M>/<D>/IW/DV/<scene>/`):
+
+1. **Discover** the latest scene over the lake — scan days newest-first; within a
+   day the ~800 time-sorted frames are *sampled* (every few frames, so no orbit
+   pass is skipped) to find the strip crossing India, then the strip's
+   time-neighbours are *zoomed* and the frame whose `productInfo.json` footprint
+   contains the lake is kept. Sentinel-1 images a given point only every ~6–12
+   days, so most days are ruled out in a couple of requests. Result is cached
+   per-day in `data/_s1_aws_index.json`.
+2. **Read + geocode** — each GRD `measurement/iw-vv.tiff` already carries the
+   geolocation grid as ~200 embedded GCPs (EPSG:4326), so only the lake window is
+   `reproject`-ed (via those GCPs) onto the Sentinel-2 grid — a few `/vsicurl`
+   range reads, ~2 s. Backscatter is returned as `10·log10(DN²)` dB, an
+   *uncalibrated γ⁰ proxy* — all the CFAR local-contrast detector needs.
+
+Because the two products are both delivered geocoded on a shared grid, the
+overlay registers them with the **bounded translation-only** model
+(`run_proposed(registration="translation", max_translation=…)`): the residual is a
+small co-registration offset + limited inter-pass debris drift, and a free
+rotation/scale would over-fit the handful of real SAR detections.
+
+### 2b. Microsoft Planetary Computer — ✅ anonymous, no account
 
 `src/acquire.py::fetch_latest_s1_pc` searches the `sentinel-1-rtc` collection on
 Planetary Computer, signs the asset URLs anonymously with the free
@@ -63,8 +100,8 @@ pip install pystac-client planetary-computer rioxarray
 python fetch_and_overlay.py --lake ambazari --s1 pc     # real S1 × real S2 overlay
 ```
 
-This is the portable, fully-live SAR route used by `fetch_and_overlay.py`; it is
-blocked only where the PC endpoint is denied by network policy.
+Portable and fully-live where the PC endpoint is reachable; `fetch_and_overlay.py
+--s1 auto` tries the AWS bucket (§2a) first and falls back to this.
 
 ### 2b. Google Earth Engine — ⚙️ needs one-time auth
 
@@ -105,13 +142,18 @@ result = run_proposed(scene, putative_radius=14, ransac_threshold=4, match_radiu
 ## 3. Network note (this project's build sandbox)
 
 In the hosted build environment used to develop this repo, the egress policy
-**allows** the public `sentinel-cogs` S3 bucket (so **Sentinel-2 is genuinely
-live**) but **blocks** the S1 STAC endpoints (Earth Search, Planetary Computer,
-Copernicus) and Earth Engine has no credentials. There, the SAR point set is
-**derived from the real optical detections** (`simulate_sar_pointset`) — an
-independent, noisy, mis-registered sample plus SAR clutter — so the cross-modal
-demo still runs on the **real Nagpur optical scene**. On your own machine / Colab,
-use §2 for a fully-live S1×S2 result.
+**allows public AWS S3 Open-Data buckets** but **blocks** every S1 *discovery API*
+(Earth Search, Planetary Computer, Copernicus Data Space, ASF), and Earth Engine
+has no credentials. Because the AWS route (§2a) needs only S3 — no discovery
+service — **both sensors are genuinely live here**: `--s1 aws` fetches the latest
+real Sentinel-1D GRD over the lake and the latest clear real Sentinel-2, and
+aligns them. (`--s1 pc` fails in this sandbox with a 403 on the PC endpoint, by
+design — that host is not on the allow-list; do not route around it.)
+
+`--s1 simulate` remains as a fully-offline fallback: it derives the SAR point set
+from the real optical detections (`simulate_sar_pointset`) — an independent,
+noisy, mis-registered sample plus SAR clutter — for environments with no outbound
+network at all. It is clearly labelled as a stand-in.
 
 ---
 

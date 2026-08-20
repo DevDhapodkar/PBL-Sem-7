@@ -61,6 +61,8 @@ def run_proposed(
     cpd_w: float = 0.4,
     match_radius: float = 20.0,
     confidence_threshold: float = 0.30,
+    registration: str = "similarity",
+    max_translation: float | None = None,
     verbose: bool = False,
 ) -> PipelineResult:
     """Run the full proposed pipeline on a scene. Registers SAR -> optical frame.
@@ -69,9 +71,20 @@ def run_proposed(
     spatial proximity -- correct for geocoded S1/S2 with a residual offset.
     Set ``use_descriptors=True`` for large, unknown transforms (raw scenes),
     which forms them from rotation/scale-invariant shape-context descriptors.
+
+    ``registration`` selects the transform model:
+      * ``"similarity"`` (default) -- scale + rotation + translation; used for the
+        controlled simulation, where a genuine similarity mis-registration exists.
+      * ``"translation"`` -- offset only, bounded by ``max_translation``; the
+        correct, robust model for **real geocoded Sentinel-1/Sentinel-2**, whose
+        products already share a grid so the only residual is a small
+        co-registration offset plus limited inter-pass debris drift. A free
+        rotation/scale would over-fit the handful of real SAR detections and
+        manufacture an implausible "drift".
     """
     sar_xy = scene.sar_xy
     opt_xy = scene.optical_xy
+    translation_only = registration == "translation"
 
     # ---- Stage 0: putative correspondences ----------------------------------
     if use_descriptors:
@@ -81,16 +94,28 @@ def run_proposed(
     else:
         matches = spatial_putative_matches(sar_xy, opt_xy, radius=putative_radius)
 
-    # ---- Stage 1: RANSAC robust initial similarity (SAR -> optical) ---------
-    ransac = ransac_similarity(sar_xy, opt_xy, matches, threshold=ransac_threshold)
+    # ---- Stage 1: RANSAC robust initial transform (SAR -> optical) ----------
+    ransac = ransac_similarity(
+        sar_xy, opt_xy, matches, threshold=ransac_threshold,
+        min_inliers=2 if translation_only else 4,
+        model="translation" if translation_only else "similarity",
+        max_translation=max_translation,
+    )
     T_init = ransac.T if ransac.success else np.eye(3)
 
     # ---- Stage 2: CPD refinement, warm-started by RANSAC --------------------
     # RANSAC already fixed the scale, so CPD refines the RIGID pose only
     # (rotation + translation). Rigid CPD has no scale-shrink degeneracy and its
     # uniform-noise component absorbs the residual clutter RANSAC did not use.
-    cpd = cpd_rigid(sar_xy, opt_xy, init_T=T_init, w=cpd_w, allow_scale=False)
+    # For geocoded S1/S2 CPD refines the offset only (allow_rotation=False).
+    cpd = cpd_rigid(sar_xy, opt_xy, init_T=T_init, w=cpd_w, allow_scale=False,
+                    allow_rotation=not translation_only)
     T_final = cpd.T
+    # keep the refined offset within the physical bound (guard against a sparse-
+    # data CPD run wandering toward a global-centroid alignment)
+    if translation_only and max_translation is not None:
+        if np.hypot(*T_final[:2, 2]) > max_translation:
+            T_final = T_init
     sar_in_opt = apply_transform(T_final, sar_xy)
 
     # ---- Stage 3: cross-modal validation & confidence -----------------------

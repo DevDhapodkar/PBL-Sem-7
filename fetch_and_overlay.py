@@ -21,13 +21,20 @@ Usage
     python fetch_and_overlay.py --s1 simulate         # S1 derived from optical (offline demo)
 
 S1 modes:
-  auto      try real Sentinel-1 (Planetary Computer, anonymous); fall back to
-            'simulate' if the PC endpoint is unreachable (e.g. restricted network).
-  pc        require real Sentinel-1 RTC from Planetary Computer.
+  auto      try REAL Sentinel-1, most-reachable source first: the public AWS GRD
+            bucket (needs only S3 access — the same network the S2 reader uses),
+            then Planetary Computer; fall back to 'simulate' only if neither real
+            source is reachable.
+  aws       require real Sentinel-1 GRD from the public AWS bucket sentinel-s1-l1c
+            (anonymous, no account, no STAC service — works behind egress policies
+            that block the discovery APIs). This is the fully-live path.
+  pc        require real Sentinel-1 RTC from Microsoft Planetary Computer
+            (anonymous, but the PC endpoint must be reachable).
   simulate  derive an independent, drifted SAR point set from the real optical
             detections (works fully offline; clearly a stand-in).
 
-Real Sentinel-1 needs:  pip install pystac-client planetary-computer rioxarray
+Real Sentinel-1 via AWS needs only:  pip install rasterio pyproj  (already required)
+Real Sentinel-1 via PC needs:        pip install pystac-client planetary-computer rioxarray
 """
 
 from __future__ import annotations
@@ -67,21 +74,44 @@ def _try_real_s2(lake, allow_live):
     return bs
 
 
+def _real_s1_from_bandstack(bs_sar, water, source_label):
+    """Detect SAR debris in a real Sentinel-1 VV/VH BandStack -> pipeline inputs.
+
+    Uses a slightly more sensitive CFAR threshold (k=2.0) than the conservative
+    default: on a single small lake the strongest-only anomalies are too few to
+    register, and the cross-modal validation stage rejects the extra single-sensor
+    detections anyway, so a richer SAR point set helps and costs no precision.
+    """
+    sar = detect_sar_backscatter(bs_sar, water, k=2.0)
+    print(f"  Sentinel-1 (SAR):     {bs_sar.meta['scene']}  "
+          f"{bs_sar.meta['date']}  [{source_label}]  -> {len(sar)} detections")
+    return sar, {"matrix_sar_to_opt": np.eye(3), "note": "live S1"}, bs_sar.meta
+
+
 def _get_s1(mode, lake, bs, opt_dets, water, seed):
     """Return (sar_detections, true_transform, s1_meta) per the chosen S1 mode."""
+    # --- real Sentinel-1 from the public AWS GRD bucket (most reachable) ---
+    if mode in ("auto", "aws"):
+        try:
+            from src.acquire import fetch_latest_s1_aws
+            print("  searching the AWS Sentinel-1 GRD bucket for the latest scene "
+                  "over this lake …")
+            bs_sar = fetch_latest_s1_aws(lake, bs)
+            return _real_s1_from_bandstack(bs_sar, water, "AWS sentinel-s1-l1c, live")
+        except Exception as e:
+            if mode == "aws":
+                raise
+            print(f"  real S1 via AWS unavailable ({str(e)[:70]});")
+    # --- real Sentinel-1 RTC from Planetary Computer ---
     if mode in ("auto", "pc"):
         try:
             from src.acquire import fetch_latest_s1_pc
             bs_sar = fetch_latest_s1_pc(lake, bs)
-            sar = detect_sar_backscatter(bs_sar, water)
-            print(f"  Sentinel-1 (SAR):     {bs_sar.meta['scene']}  "
-                  f"{bs_sar.meta['date']}  [Planetary Computer, live]  "
-                  f"-> {len(sar)} detections")
-            return sar, {"matrix_sar_to_opt": np.eye(3), "note": "live S1"}, bs_sar.meta
+            return _real_s1_from_bandstack(bs_sar, water, "Planetary Computer, live")
         except Exception as e:
             if mode == "pc":
                 raise
-            print(f"  live S1 unavailable ({str(e)[:70]});")
+            print(f"  real S1 via Planetary Computer unavailable ({str(e)[:70]});")
             print("  -> falling back to S1 derived from the real optical scene.")
     sar, tt, _ = simulate_sar_pointset(opt_dets, water, seed=seed)
     meta = {"source": "Sentinel-1 (simulated from real optical)",
@@ -95,7 +125,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lake", default="ambazari", help="Nagpur lake key (see src/nagpur.py)")
-    ap.add_argument("--s1", choices=["auto", "pc", "simulate"], default="auto")
+    ap.add_argument("--s1", choices=["auto", "aws", "pc", "simulate"], default="auto")
     ap.add_argument("--no-live-s2", action="store_true",
                     help="skip the live S2 fetch and use the bundled cache")
     ap.add_argument("--out", default="results/overlay_latest.png")
@@ -118,11 +148,27 @@ def main():
     # --- assemble scene + register with RANSAC+CPD ---
     scene = Scene(true_debris=np.empty((0, 2)), sar=sar_dets, optical=opt_dets,
                   true_transform=tt)
-    proposed = run_proposed(scene, putative_radius=16, ransac_threshold=5,
-                            match_radius=6)
+    # Real Sentinel-1/Sentinel-2 are both delivered geocoded on a shared grid, so
+    # the residual misalignment is a small translation (co-registration + limited
+    # inter-pass debris drift), not a free similarity. Use the bounded
+    # translation-only model so the sparse real SAR detections can't over-fit a
+    # spurious rotation/scale.
+    proposed = run_proposed(scene, registration="translation",
+                            putative_radius=16, ransac_threshold=5,
+                            match_radius=8, max_translation=20)
 
-    # --- estimate drift (translation of the recovered transform) ---
-    drift_px = float(np.hypot(*proposed.T_final[:2, 2]))
+    # --- estimate drift (net translational offset the registration removed) ---
+    # NOT the raw translation column of T_final: under any recovered rotation that
+    # column is measured about the pixel origin and is physically meaningless. The
+    # inter-pass offset is the net translation of the SAR cloud, i.e. how far its
+    # centroid moved — rotation about the centroid contributes zero, so this is the
+    # pure translational drift + residual co-registration between the two passes.
+    sar_raw = scene.sar_xy
+    sar_reg = proposed.sar_in_opt
+    if len(sar_raw):
+        drift_px = float(np.hypot(*(sar_reg.mean(0) - sar_raw.mean(0))))
+    else:
+        drift_px = 0.0
     drift_m = drift_px * 10.0                       # 10 m pixels
     print("\nRegistration (RANSAC → CPD):")
     print(f"  putative {proposed.n_putative} · RANSAC inliers {proposed.n_ransac_inliers}"

@@ -90,7 +90,7 @@ Coordinates and windows live in [`src/nagpur.py`](src/nagpur.py).
 | Modality | Product | Source | Live status |
 |----------|---------|--------|-------------|
 | **Sentinel-2 (optical)** | L2A surface reflectance (COG) | public AWS bucket `sentinel-cogs` (Copernicus mirror), tile `44QKJ` | ✅ **Real & live** — read directly by `src/acquire.py::fetch_sentinel2` (GDAL `/vsicurl` range reads; no credentials). Five Nagpur lakes are also **bundled** in `data/` so the app works offline. |
-| **Sentinel-1 (SAR)** | GRD VV/VH (γ⁰, dB) | Google Earth Engine `COPERNICUS/S1_GRD` | ⚙️ **Real via `src/acquire.py::fetch_sentinel1_ee`** on your machine (one-time `earthengine authenticate`). Where the S1 endpoints are blocked (e.g. this project's build sandbox), the SAR point set is **derived from the real optical detections** as an independent, noisy, mis-registered sample + SAR clutter, so the cross-modal demo runs on the real optical scene. Clearly labelled in the app. |
+| **Sentinel-1 (SAR)** | GRD VV/VH (γ⁰ proxy, dB) | public AWS bucket `sentinel-s1-l1c` (Sinergise Open Data) | ✅ **Real & live** — `src/acquire.py::fetch_latest_s1_aws` finds the latest scene over the lake and warps VV/VH onto the S2 grid via the GRD's embedded GCPs. **Needs only S3 access (no account, no STAC service)**, so it is live even in networks that block the S1 discovery APIs / Planetary Computer. Also available: `fetch_latest_s1_pc` (Planetary Computer) and `fetch_sentinel1_ee` (Earth Engine). An offline `simulate` fallback remains for no-network environments. |
 
 The bundled scenes are genuine Sentinel-2 L2A windows over each lake (e.g. Ambazari
 = `S2A_44QKJ_20240108`, 2024-01-08). The image below is **real Sentinel-2 data**
@@ -107,25 +107,32 @@ western fingers of the lake where hyacinth accumulates.*
 
 `python fetch_and_overlay.py --lake ambazari` fetches the **most recent low-cloud
 Sentinel-2** scene and the **latest Sentinel-1** scene over the lake, detects
-debris in each, and overlays them. Because the two sensors image at *different
-times*, floating debris **drifts** between passes — the RANSAC+CPD step estimates
-that drift and aligns the two debris clouds so genuine debris seen by **both**
-sensors can be matched:
+debris in each, and overlays them. The two sensors image at *different times* and
+carry a small residual co-registration, so a genuine debris seen by both is
+slightly offset between the two point sets. Because both products are delivered
+geocoded on a shared grid, the overlay recovers that offset with a **bounded,
+robust translation** (RANSAC → translation-only CPD, capped at a physical bound)
+and then matches the debris seen by **both** sensors — a free rotation/scale would
+over-fit the handful of real SAR detections:
 
 ![Latest S1 × S2 debris overlay](docs/img/overlay_latest.png)
 
-*Real Sentinel-2 of Ambazari Lake (2026-07-16). **Left** — raw overlay: S2 optical
-(○ cyan) and S1 SAR (▲) debris are offset by the inter-pass drift + co-registration.
-**Right** — after RANSAC+CPD registration the SAR (▲ green) lines up with the
-optical, and the ~30 debris seen by **both** sensors are ringed in yellow. The
-script reports the estimated drift (here ≈ 100 m) and the S1–S2 time gap.*
+*Fully real: **Sentinel-2** of Ambazari Lake (2026-07-16, latest clear) × **Sentinel-1D**
+GRD (2026-08-10, latest pass), both fetched live. **Left** — raw overlay: S2 optical
+(○ cyan) and S1 SAR (▲ red) debris. **Right** — after the bounded translation
+registration the SAR (▲ green) lines up with the optical; the debris seen by
+**both** sensors are ringed in yellow (here 5), while the scattered single-sensor
+detections — including optical false alarms over the built-up shore — are correctly
+**left un-corroborated**. The recovered residual offset is small (~50 m, i.e. the
+S1/S2 co-registration + limited inter-pass drift), and the script reports it with
+the S1–S2 time gap.*
 
-> **Sentinel-1 note.** With `--s1 pc` the script pulls **real** Sentinel-1 RTC from
-> Microsoft Planetary Computer (anonymous, no account — `pip install pystac-client
-> planetary-computer rioxarray`). Where the S1 endpoint is unreachable (e.g. this
-> repo's build sandbox), it falls back to an S1 view **derived from the real
-> optical detections** (an independent, drifted sample), clearly labelled — so the
-> overlay above still runs on the **real, latest Sentinel-2** scene.
+> **Sentinel-1 is real here.** `--s1 aws` (the default `auto` tries it first) pulls
+> **real** Sentinel-1 GRD straight from the public AWS bucket `sentinel-s1-l1c` —
+> anonymous, no account, and needing only S3 access, so it is live even in networks
+> that block the S1 discovery APIs / Planetary Computer (`--s1 pc`). An offline
+> `--s1 simulate` fallback (SAR derived from the real optical detections, clearly
+> labelled) remains for environments with no outbound network at all.
 
 ---
 
@@ -296,12 +303,12 @@ cannot reject.*
 
 | Method | Precision | Recall | F1 | Average Precision |
 |--------|:---:|:---:|:---:|:---:|
-| optical-only | 0.74 | 0.81 | 0.77 | 0.74 |
-| traditional (ICP) | 0.75 | 0.29 | 0.40 | 0.64 |
-| **proposed (RANSAC+CPD)** | **0.91** | 0.52 | **0.65** | **0.79** |
+| optical-only | 0.75 | 0.81 | 0.78 | 0.75 |
+| traditional (ICP) | 0.79 | 0.30 | 0.42 | 0.66 |
+| **proposed (RANSAC+CPD)** | **0.93** | 0.54 | **0.67** | **0.81** |
 
 Here the proposed method **dominates the traditional ICP method on every metric**
-(F1 0.65 vs 0.40, AP 0.79 vs 0.64) — same fusion stage, so the gap is purely the
+(F1 0.67 vs 0.42, AP 0.81 vs 0.66) — same fusion stage, so the gap is purely the
 registration — and holds precision as clutter grows where the baselines collapse.
 
 ![Simulation — registration](docs/img/sim_registration.png)
@@ -328,7 +335,7 @@ optical-only collapses.*
 3. **RANSAC+CPD beats the traditional ICP method.** With the fusion stage held
    identical, replacing ICP with RANSAC-initialised rigid CPD **recovers more true
    cross-modal corroborations** (higher recall at equal-or-better precision on the
-   larger lakes; a decisive F1 0.65 vs 0.40 and AP 0.79 vs 0.64 in controlled
+   larger lakes; a decisive F1 0.67 vs 0.42 and AP 0.81 vs 0.66 in controlled
    simulation), because it registers the noisy, outlier-laden point sets far more
    robustly.
 4. **The registration-gated confidence keeps the method honest.** `Q_reg` prevents
@@ -388,9 +395,14 @@ Other modes: `./run.sh demo` (batch benchmark) · `./run.sh test` (tests)
 **Latest S1 × S2 debris overlay** (most-recent clear Sentinel-2 + latest Sentinel-1):
 
 ```bash
-python fetch_and_overlay.py --lake ambazari            # auto S1 (real if reachable)
-python fetch_and_overlay.py --lake gorewada --s1 pc    # force real S1 (Planetary Computer)
+python fetch_and_overlay.py --lake ambazari            # auto: real S1 from AWS, then PC
+python fetch_and_overlay.py --lake gorewada --s1 aws   # force real S1 (public AWS GRD bucket)
+python fetch_and_overlay.py --lake futala  --s1 pc     # force real S1 (Planetary Computer)
 ```
+
+The `--s1 aws` path is fully real and needs **no extra install and no account** —
+it reads Sentinel-1 GRD from the public `sentinel-s1-l1c` S3 bucket (see
+[`docs/DATA.md`](docs/DATA.md) §2a).
 
 ### Manual (if you prefer)
 
@@ -421,7 +433,7 @@ For **live Sentinel-1** (your machine): `earthengine authenticate`, then
 ```
 src/
   nagpur.py            Nagpur lake AOIs + Sentinel-2 tile (44QKJ) constants
-  acquire.py           live Sentinel-2 (public COG bucket) + Sentinel-1 (Earth Engine) acquisition; cache loader
+  acquire.py           live Sentinel-2 (public COG bucket) + Sentinel-1 (public AWS GRD bucket / Planetary Computer / Earth Engine); cache loader
   detect_real.py       real detectors: NDWI water mask, NDVI/FDI floating matter, SAR anomaly -> point sets
   detection.py         generic detector interface (Detection records)
   data_simulation.py   synthetic S1/S2 scenes for controlled testing
@@ -447,10 +459,17 @@ docs/
 
 ## 12. Limitations & future work
 
-* **Sentinel-1 in this hosted build is simulated from the real optical scene**
-  (the S1 endpoints are blocked by the sandbox's network policy). The real
-  Earth-Engine S1 path is implemented — run it where EE is reachable for a
-  fully-live cross-modal result.
+* **Cross-modal corroboration on a single small lake is inherently sparse.** The
+  fully-real overlay pairs the *latest* clear S2 with the *latest* S1 pass, which
+  in monsoon season can be weeks apart (e.g. 25 days in the shipped figure); a
+  larger time gap and a handful of SAR anomalies mean only a few debris corroborate.
+  Pairing S1 to the S2 *date* (rather than newest), or aggregating over several
+  lakes/dates, would strengthen the real-data statistics. The **relative** ordering
+  of the methods (from the controlled benchmark) is the headline result.
+* **The AWS SAR backscatter is an *uncalibrated* γ⁰ proxy** (`10·log10(DN²)`, no
+  calibration LUT applied). This is sufficient for the CFAR *local-contrast*
+  detector but not for absolute σ⁰/γ⁰ analysis — apply the product's calibration
+  annotation for that.
 * **No field-validated debris labels yet.** Ground truth here is the
   both-sensors-agree set / synthetic truth. Validate against annotated data
   (MARIDA-style, or in-situ Nagpur surveys) before any operational claim.

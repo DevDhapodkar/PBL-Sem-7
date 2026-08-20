@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
@@ -36,6 +37,14 @@ from .nagpur import S2_TILE, UTM_EPSG, Lake
 
 S2_BUCKET = "https://sentinel-cogs.s3.us-west-2.amazonaws.com"
 S2_PREFIX = "sentinel-s2-l2a-cogs/44/Q/KJ"     # Nagpur tile 44QKJ
+
+# Sentinel-1 GRD (SAR) — public AWS Open-Data bucket (Sinergise), read anonymously
+# over plain HTTPS range requests. Unlike the STAC discovery APIs / Planetary
+# Computer (both blocked by some egress policies), this bucket is a bare S3 store
+# reachable wherever `*.s3.amazonaws.com` is, so it gives a fully-live SAR path
+# that works in the same networks as the Sentinel-2 COG bucket above.
+S1_BUCKET = "https://sentinel-s1-l1c.s3.amazonaws.com"
+S1_PREFIX = "GRD"                              # GRD/<Y>/<M>/<D>/IW/DV/<scene>/
 
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _S2_BANDS = ("B02", "B03", "B04", "B06", "B08", "B11")
@@ -376,3 +385,232 @@ def _to_lonlat_box(crs, box):
     L, B_, R, T = box
     xs, ys = t.transform([L, R, L, R], [B_, B_, T, T])
     return [min(xs), min(ys), max(xs), max(ys)]
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-1 (SAR) — live from the public AWS GRD bucket (no account, no STAC)
+# ---------------------------------------------------------------------------
+# The nice Sentinel-1 discovery services (Copernicus Data Space, Earth Engine,
+# Microsoft Planetary Computer, ASF, Element-84 Earth Search) are all HTTPS APIs
+# that a restrictive egress policy can block. The public AWS Open-Data GRD bucket
+# ``sentinel-s1-l1c`` is different: it is a bare S3 store, reachable wherever the
+# Sentinel-2 COG bucket is, and its objects — including the VV/VH measurement
+# GeoTIFFs — are anonymously readable over HTTPS range requests. Each GRD tiff
+# already carries the geolocation grid as ~200 embedded GCPs (EPSG:4326), so we
+# can warp just the lake window straight onto the Sentinel-2 grid.
+#
+# The bucket is partitioned only by date (GRD/Y/M/D/IW/DV/<scene>/), so there is
+# no spatial query. We recover "the latest scene over this lake" cheaply: for each
+# day (newest first) we *sample* a few dozen scene footprints to find the orbit
+# strip crossing India, then *zoom* into that strip's time-neighbours and keep the
+# frame whose footprint actually contains the lake. Sentinel-1 only images a given
+# point every ~6-12 days, so most days have no coverage and are skipped in a
+# couple of requests.
+
+def _s1_http(url, timeout=20):
+    req = urllib.request.Request(url, headers={"User-Agent": "nagpur-debris"})
+    return urllib.request.urlopen(req, timeout=timeout).read()
+
+
+def _s1_list_day(day) -> list[str]:
+    """All IW/DV (dual-pol VV+VH) GRD scene prefixes acquired on ``day``."""
+    out: list[str] = []
+    token = None
+    pre = f"{S1_PREFIX}/{day.year}/{day.month}/{day.day}/IW/DV/"
+    while True:
+        url = (f"{S1_BUCKET}/?list-type=2&prefix={pre}&delimiter=/&max-keys=1000")
+        if token:
+            url += f"&continuation-token={urllib.parse.quote(token)}"
+        xml = _s1_http(url, timeout=30).decode()
+        out += re.findall(r"<Prefix>([^<]+/)</Prefix>", xml)
+        m = re.search(r"<NextContinuationToken>([^<]+)</NextContinuationToken>", xml)
+        token = m.group(1) if m else None
+        if not token:
+            break
+    return [p for p in out if p.rstrip("/").split("/")[-1].startswith("S1")]
+
+
+def _s1_bbox(scene_prefix):
+    """(scene_prefix, lon0, lat0, lon1, lat1) from the scene's tiny productInfo.json."""
+    import json
+    try:
+        pi = json.loads(_s1_http(f"{S1_BUCKET}/{scene_prefix}productInfo.json", timeout=12))
+    except Exception:
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+
+    def walk(a):
+        if a and isinstance(a[0], (int, float)):
+            xs.append(a[0]); ys.append(a[1])
+        else:
+            for b in a:
+                walk(b)
+
+    walk(pi.get("footprint", {}).get("coordinates", []))
+    if not xs:
+        return None
+    return (scene_prefix, min(xs), min(ys), max(xs), max(ys))
+
+
+def find_latest_s1_aws_scene(lake: Lake, start=None, days_back: int = 30,
+                             sample_step: int = 7, zoom: int = 24,
+                             progress=None) -> dict:
+    """
+    Find the **latest** Sentinel-1 GRD scene over ``lake`` on the public AWS bucket.
+
+    Scans days newest-first. Within a day the ~800 frames are time-sorted, so one
+    orbit pass over India is a contiguous run of ~12-15 frames; we sample every
+    ``sample_step`` frames (< a pass length, so no pass is skipped) to locate the
+    strip near the lake, then *zoom* its time-neighbours to confirm the exact
+    frame(s) containing the lake. Returns ``{"scene", "id", "date"}`` for the newest
+    covering frame (best-centred when a datatake has several). Raises RuntimeError
+    if none is found in the window.
+    """
+    import datetime as _dt
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _covers(b):
+        return b and b[1] <= lake.lon <= b[3] and b[2] <= lake.lat <= b[4]
+
+    today = start or _dt.date.today()
+
+    # day-scoped cache: "latest over this lake" only changes when a new pass lands,
+    # so re-runs on the same day skip the ~hundreds of footprint probes.
+    cache_path = os.path.join(_CACHE_DIR, "_s1_aws_index.json")
+    cache_key = f"{lake.key}:{today.isoformat()}"
+    try:
+        cache = json.load(open(cache_path))
+    except Exception:
+        cache = {}
+    if cache_key in cache:
+        if progress:
+            progress(f"  S1 (cached): {cache[cache_key]['id']} {cache[cache_key]['date']}")
+        return cache[cache_key]
+
+    for back in range(days_back):
+        day = today - _dt.timedelta(days=back)
+        try:
+            scenes = sorted(_s1_list_day(day))
+        except Exception:
+            continue
+        if not scenes:
+            continue
+        # 1) sample every `sample_step` frames — dense enough that no orbit pass
+        #    (a ~12-frame contiguous run) falls entirely between two samples.
+        idx = list(range(0, len(scenes), max(1, sample_step)))
+        with ThreadPoolExecutor(max_workers=48) as ex:
+            samp = list(ex.map(_s1_bbox, [scenes[i] for i in idx]))
+        near = []
+        for k, b in zip(idx, samp):
+            if not b:
+                continue
+            clon, clat = (b[1] + b[3]) / 2, (b[2] + b[4]) / 2
+            if abs(clon - lake.lon) <= 9 and abs(clat - lake.lat) <= 12:
+                near.append(k)
+        if progress:
+            progress(f"  S1 scan {day}: {len(scenes)} frames, "
+                     f"{len(near)} near-lake samples")
+        # 2) zoom the time-neighbours of each near-lake sample and confirm coverage
+        windows = set()
+        for k in near:
+            for j in range(max(0, k - zoom), min(len(scenes), k + zoom + 1)):
+                windows.add(j)
+        hits = []
+        if windows:
+            with ThreadPoolExecutor(max_workers=48) as ex:
+                for b in ex.map(_s1_bbox, [scenes[j] for j in sorted(windows)]):
+                    if _covers(b):
+                        hits.append(b)
+        if hits:
+            # best-centred frame (max margin from the frame edge)
+            best = min(hits, key=lambda b: (abs((b[1] + b[3]) / 2 - lake.lon)
+                                            + abs((b[2] + b[4]) / 2 - lake.lat)))
+            sp = best[0]
+            sid = sp.rstrip("/").split("/")[-1]
+            m = re.search(r"_(\d{8})T", sid)
+            date = m.group(1) if m else "?"
+            result = {"scene": sp, "id": sid,
+                      "date": f"{date[:4]}-{date[4:6]}-{date[6:]}" if date != "?" else "?"}
+            try:
+                cache[cache_key] = result
+                os.makedirs(_CACHE_DIR, exist_ok=True)
+                json.dump(cache, open(cache_path, "w"), indent=2)
+            except Exception:
+                pass
+            return result
+    raise RuntimeError(f"no Sentinel-1 GRD scene over {lake.name} on the AWS bucket "
+                       f"in the last {days_back} days.")
+
+
+def fetch_latest_s1_aws(lake: Lake, ref: BandStack, days_back: int = 45,
+                        start=None, progress=print) -> BandStack:
+    """
+    Fetch the **latest real Sentinel-1** VV/VH backscatter over ``lake`` from the
+    public AWS GRD bucket, warped onto the Sentinel-2 grid ``ref``.
+
+    Fully live, no account and no STAC service — works in the same networks as the
+    Sentinel-2 COG reader above. ``ref`` must be a *georeferenced* Sentinel-2
+    ``BandStack`` (from ``fetch_latest_clear_s2`` / ``fetch_sentinel2``); the SAR is
+    reprojected (via the GRD's embedded GCPs) to the same window/CRS/shape so the
+    two modalities overlay directly.
+
+    Backscatter is returned as ``10*log10(DN^2)`` dB — an *uncalibrated* γ⁰ proxy,
+    which is all the CFAR local-contrast SAR detector needs (it keys off local
+    contrast, invariant to the constant calibration offset).
+    """
+    import rasterio
+    from rasterio.transform import from_bounds as _from_bounds
+    from rasterio.warp import Resampling, reproject
+
+    if ref.transform is None:
+        raise RuntimeError("fetch_latest_s1_aws needs a georeferenced optical ref "
+                           "(use fetch_latest_clear_s2 / fetch_sentinel2, not the "
+                           "bundled cache).")
+    _gdal_env()
+    sc = find_latest_s1_aws_scene(lake, start=start, days_back=days_back,
+                                  progress=progress)
+
+    H, W = ref.shape
+    t = ref.transform
+    L, T = t.c, t.f
+    R, B_ = L + W * t.a, T + H * t.e
+    left, right = min(L, R), max(L, R)
+    bottom, top = min(B_, T), max(B_, T)
+    dst_transform = _from_bounds(left, bottom, right, top, W, H)
+
+    bands: dict[str, np.ndarray] = {}
+    with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", VSI_CACHE="TRUE",
+                      CPL_VSIL_CURL_CHUNK_SIZE="1048576"):
+        for pol in ("vv", "vh"):
+            href = f"/vsicurl/{S1_BUCKET}/{sc['scene']}measurement/iw-{pol}.tiff"
+            try:
+                with rasterio.open(href) as src:
+                    gcps, gcrs = src.get_gcps()
+                    if not gcps:
+                        continue
+                    dst = np.zeros((H, W), "float32")
+                    reproject(source=rasterio.band(src, 1), destination=dst,
+                              src_crs=gcrs, gcps=gcps,
+                              dst_transform=dst_transform, dst_crs=ref.crs,
+                              resampling=Resampling.bilinear,
+                              src_nodata=0, dst_nodata=0)
+                    valid = dst > 0
+                    with np.errstate(divide="ignore"):
+                        db = 10.0 * np.log10(np.clip(dst, 1.0, None) ** 2)
+                    # fill nodata (frame-edge) pixels with the in-window median so
+                    # the CFAR median/box filters stay finite and neutral there
+                    if valid.any() and (~valid).any():
+                        db[~valid] = float(np.median(db[valid]))
+                    bands[pol.upper()] = db
+            except Exception as e:
+                if pol == "vv":
+                    raise RuntimeError(f"failed to read Sentinel-1 {pol.upper()} "
+                                       f"({sc['id']}): {e}")
+    if "VV" not in bands:
+        raise RuntimeError(f"Sentinel-1 scene {sc['id']} had no readable VV asset.")
+    return BandStack(bands, ref.transform, ref.crs,
+                     meta={"source": "Sentinel-1 GRD (AWS sentinel-s1-l1c, γ⁰ proxy)",
+                           "date": sc["date"], "scene": sc["id"],
+                           "lake": lake.name, "live": True})
