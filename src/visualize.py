@@ -101,8 +101,9 @@ def plot_confidence(scene, proposed, threshold, path=None):
 def plot_pr_curves(curves, path=None):
     """Overlaid precision-recall curves. ``curves`` maps method -> (rec, prec, ap)."""
     fig, ax = plt.subplots(figsize=(7, 6))
-    style = {"proposed": ("#2ca02c", "-", "RANSAC+CPD (proposed)"),
-             "traditional_icp": ("#ff7f0e", "--", "ICP (traditional)"),
+    style = {"proposed": ("#2ca02c", "-", "RANSAC+CPD alignment (ours)"),
+             "traditional_icp": ("#ff7f0e", "--", "ICP alignment"),
+             "no_alignment": ("#d62728", "-.", "no alignment (traditional)"),
              "optical_only": ("#1f77b4", ":", "optical-only")}
     for name, (rec, prec, apv) in curves.items():
         col, ls, lab = style.get(name, ("k", "-", name))
@@ -127,8 +128,9 @@ def plot_robustness(sweep, path=None):
     """Precision & F1 vs increasing false-positive load, per method (2 panels)."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 5.2))
     x = sweep["x"]
-    styles = [("proposed", "#2ca02c", "RANSAC+CPD (proposed)"),
-              ("traditional_icp", "#ff7f0e", "ICP (traditional)"),
+    styles = [("proposed", "#2ca02c", "RANSAC+CPD alignment (ours)"),
+              ("traditional_icp", "#ff7f0e", "ICP alignment"),
+              ("no_alignment", "#d62728", "no alignment (traditional)"),
               ("optical_only", "#1f77b4", "optical-only")]
     for ax, metric, title in [(axes[0], "precision", "Precision vs clutter"),
                               (axes[1], "f1", "F1 vs clutter")]:

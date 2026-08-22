@@ -2,7 +2,7 @@
 Baseline / traditional methods to compare against the proposed pipeline.
 ========================================================================
 
-Two reference points, chosen so the comparison isolates *what the proposed
+Three reference points, chosen so the comparison isolates *what the proposed
 pipeline adds*:
 
 1. ``run_optical_only`` -- single-modality detection: threshold the optical
@@ -10,7 +10,17 @@ pipeline adds*:
    corroboration is needed at all: optical sun-glint / cloud false positives are
    reported as debris because nothing contradicts them.
 
-2. ``run_traditional`` -- classic cross-modal fusion using **ICP** for
+2. ``run_no_alignment`` -- **the traditional cross-modal method without any
+   point-set alignment**. It overlays the two *nominally geocoded* detection sets
+   as-is (identity transform, no registration at all) and takes the spatial
+   agreement, exactly as conventional S1/S2 fusion does when it trusts the
+   products' geolocation. This is the method our point-set-alignment idea is meant
+   to beat: whatever residual co-registration / inter-pass drift exists is *not*
+   corrected, so genuinely corresponding detections that are offset by more than
+   the match radius are simply missed. Same Stage-3 matching/decision as the
+   proposed method, so the only difference is the missing alignment.
+
+3. ``run_traditional`` -- classic cross-modal fusion using **ICP** for
    registration instead of RANSAC+CPD, then the *same* spatial matching and
    decision as the proposed method. Because ICP has no outlier model and starts
    from the identity, the modality-specific false positives and the SAR<-optical
@@ -50,6 +60,30 @@ def run_optical_only(scene: Scene) -> BaselineResult:
     fusion = FusionResult(cands, d_registration=float("nan"),
                           n_matches=0, q_reg=1.0)
     return BaselineResult("optical_only", fusion, None)
+
+
+def run_no_alignment(
+    scene: Scene,
+    *,
+    match_radius: float = 20.0,
+) -> BaselineResult:
+    """Traditional cross-modal fusion **without point-set alignment**.
+
+    Overlays the two nominally-geocoded detection sets with the identity transform
+    (no registration) and runs the same cross-modal matching/decision. This is the
+    conventional "just overlay the two products and take the agreement" method our
+    alignment idea improves on.
+    """
+    sar_xy = scene.sar_xy
+    opt_xy = scene.optical_xy
+
+    sar_in_opt = sar_xy.copy() if len(sar_xy) else sar_xy   # identity: no alignment
+    fusion = cross_modal_validation(
+        sar_in_opt, scene.sar_strength,
+        opt_xy, scene.optical_strength,
+        match_radius=match_radius,
+    )
+    return BaselineResult("no_alignment", fusion, sar_in_opt, icp_rmse=None)
 
 
 def run_traditional(

@@ -1,0 +1,50 @@
+[
+  {
+    "lake": "Ambazari Lake",
+    "key": "ambazari",
+    "s2_scene": "S2C_44QKJ_20260716_0_L2A",
+    "s2_date": "2026-07-16",
+    "s1_scene": "S1D_IW_GRDH_1SDV_20260810T003701_20260810T003726_004056_007638_F913",
+    "s1_date": "2026-08-10",
+    "n_optical": 41,
+    "n_sar": 31,
+    "offset_px": 5.0,
+    "offset_m": 50,
+    "n_corr_noalign": 5,
+    "n_corr_ours": 5,
+    "dreg_ours_px": 4.5,
+    "gap_days": 25
+  },
+  {
+    "lake": "Gorewada Lake",
+    "key": "gorewada",
+    "s2_scene": "S2C_44QKJ_20260530_0_L2A",
+    "s2_date": "2026-05-30",
+    "s1_scene": "S1D_IW_GRDH_1SDV_20260810T003701_20260810T003726_004056_007638_F913",
+    "s1_date": "2026-08-10",
+    "n_optical": 47,
+    "n_sar": 25,
+    "offset_px": 1.9,
+    "offset_m": 19,
+    "n_corr_noalign": 11,
+    "n_corr_ours": 10,
+    "dreg_ours_px": 4.7,
+    "gap_days": 72
+  },
+  {
+    "lake": "Futala Lake",
+    "key": "futala",
+    "s2_scene": "S2C_44QKJ_20260527_0_L2A",
+    "s2_date": "2026-05-27",
+    "s1_scene": "S1D_IW_GRDH_1SDV_20260810T003701_20260810T003726_004056_007638_F913",
+    "s1_date": "2026-08-10",
+    "n_optical": 49,
+    "n_sar": 15,
+    "offset_px": 13.0,
+    "offset_m": 130,
+    "n_corr_noalign": 8,
+    "n_corr_ours": 7,
+    "dreg_ours_px": 4.0,
+    "gap_days": 75
+  }
+]

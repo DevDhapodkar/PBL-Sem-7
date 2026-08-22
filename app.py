@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from src.baseline import run_optical_only, run_traditional
+from src.baseline import run_no_alignment, run_optical_only, run_traditional
 from src.data_simulation import simulate_scene
 from src.evaluate import best_f1, precision_recall_curve, score_locations, strength_pr_curve
 from src.pipeline import run_proposed
@@ -101,13 +101,15 @@ def compute_sim(seed, n_debris, p_sar, p_opt, n_fs, n_fo, scale, rot, tx, ty,
 def render_metrics(scene, proposed, traditional, match_radius, conf_thr,
                    optical_thr, report_all_optical=False):
     truth = scene.true_debris
+    no_align = run_no_alignment(scene, match_radius=match_radius)
     scored = {
         "optical_only": [(d.xy, d.strength) for d in scene.optical],
+        "no_alignment": [(c.xy, c.confidence) for c in no_align.fusion.candidates],
         "traditional_icp": [(c.xy, c.confidence) for c in traditional.fusion.candidates],
         "proposed": [(c.xy, c.confidence) for c in proposed.fusion.candidates],
     }
     thr = {"optical_only": 0.0 if report_all_optical else optical_thr,
-           "traditional_icp": conf_thr, "proposed": conf_thr}
+           "no_alignment": conf_thr, "traditional_icp": conf_thr, "proposed": conf_thr}
     rows = {}
     for name, pts in scored.items():
         sel = np.array([xy for xy, s in pts if s >= thr[name]]) if pts else np.empty((0, 2))
@@ -217,7 +219,9 @@ if mode.startswith("🛰️"):
     with t_cmp:
         st.markdown("##### Recovery of the corroborable floating matter "
                     "(objects both sensors saw)")
+        m_na = rows["no_alignment"]
         disp = {"optical-only (trust all S2)": m_opt,
+                "no alignment (traditional)": m_na,
                 "traditional (ICP)": m_trad, "proposed (RANSAC+CPD)": m_prop}
         st.dataframe({"method": list(disp), "precision": [f"{m.precision:.2f}" for m in disp.values()],
                       "recall": [f"{m.recall:.2f}" for m in disp.values()],
@@ -227,20 +231,22 @@ if mode.startswith("🛰️"):
                      width='stretch', hide_index=True)
         rec_p, prec_p, _, ap_p = precision_recall_curve(proposed.fusion.candidates,
                                                         scene.true_debris, match_radius)
+        rec_n, prec_n, ap_n = strength_pr_curve(scored["no_alignment"], scene.true_debris, match_radius)
         rec_t, prec_t, ap_t = strength_pr_curve(scored["traditional_icp"], scene.true_debris, match_radius)
         rec_o, prec_o, ap_o = strength_pr_curve(scored["optical_only"], scene.true_debris, match_radius)
         c1, c2 = st.columns([3, 2])
         c1.pyplot(visualize.plot_pr_curves({"proposed": (rec_p, prec_p, ap_p),
                   "traditional_icp": (rec_t, prec_t, ap_t),
+                  "no_alignment": (rec_n, prec_n, ap_n),
                   "optical_only": (rec_o, prec_o, ap_o)}), width='stretch')
         with c2:
-            st.metric("Proposed AP", f"{ap_p:.3f}")
-            st.metric("Traditional AP", f"{ap_t:.3f}", f"{ap_p-ap_t:+.3f}")
-            st.metric("Optical-only AP", f"{ap_o:.3f}", f"{ap_p-ap_o:+.3f}")
-            st.caption("optical-only cannot separate corroborated debris from "
-                       "single-sensor artifacts → precision ceiling. Cross-modal "
-                       "validation lifts it; RANSAC+CPD recovers more true matches "
-                       "than ICP.")
+            st.metric("Proposed AP (with alignment)", f"{ap_p:.3f}")
+            st.metric("No-alignment AP", f"{ap_n:.3f}", f"{ap_p-ap_n:+.3f}")
+            st.metric("ICP-alignment AP", f"{ap_t:.3f}", f"{ap_p-ap_t:+.3f}")
+            st.caption("The **no-alignment** baseline is the traditional method "
+                       "*without our point-set alignment*: it overlays the two "
+                       "geocoded detection sets as-is. Aligning them first is what "
+                       "recovers the corroborated debris — and beats ICP too.")
 
     with t_about:
         st.markdown(
@@ -334,17 +340,24 @@ else:
         b = best_f1(scored["proposed"], scene.true_debris, mr)
         c2.success(f"Best-F1 {b['f1']:.3f} at T={b['threshold']:.2f}")
     with t_cmp:
-        disp = {"optical-only": m_opt, "traditional (ICP)": m_trad, "proposed": m_prop}
+        m_na = rows["no_alignment"]
+        disp = {"optical-only": m_opt, "no alignment (traditional)": m_na,
+                "traditional (ICP)": m_trad, "proposed": m_prop}
         st.dataframe({"method": list(disp), "precision": [f"{m.precision:.3f}" for m in disp.values()],
                       "recall": [f"{m.recall:.3f}" for m in disp.values()],
                       "F1": [f"{m.f1:.3f}" for m in disp.values()]},
                      width='stretch', hide_index=True)
         rec_p, prec_p, _, ap_p = precision_recall_curve(proposed.fusion.candidates, scene.true_debris, mr)
+        rec_n, prec_n, ap_n = strength_pr_curve(scored["no_alignment"], scene.true_debris, mr)
         rec_t, prec_t, ap_t = strength_pr_curve(scored["traditional_icp"], scene.true_debris, mr)
         rec_o, prec_o, ap_o = strength_pr_curve(scored["optical_only"], scene.true_debris, mr)
         st.pyplot(visualize.plot_pr_curves({"proposed": (rec_p, prec_p, ap_p),
                   "traditional_icp": (rec_t, prec_t, ap_t),
+                  "no_alignment": (rec_n, prec_n, ap_n),
                   "optical_only": (rec_o, prec_o, ap_o)}), width='stretch')
+        st.caption("**No alignment** = the traditional method without our point-set "
+                   "alignment (identity overlay). It collapses because the two point "
+                   "sets are offset; aligning them first is the contribution.")
     with t_about:
         st.markdown("Synthetic stress-test of the same pipeline. Switch to "
                     "**Nagpur — real Sentinel-2** for live imagery. See "

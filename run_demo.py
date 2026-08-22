@@ -3,17 +3,22 @@
 End-to-end demo & benchmark for the Sentinel-1/Sentinel-2 debris pipeline.
 ==========================================================================
 
-Runs three methods on the same simulated scene(s):
+Runs four methods on the same simulated scene(s):
 
     1. optical_only     -- single-modality baseline (no fusion)
-    2. traditional_icp  -- cross-modal fusion with classic ICP registration
-    3. proposed         -- RANSAC init -> CPD refine -> cross-modal confidence
+    2. no_alignment     -- traditional cross-modal fusion WITHOUT point-set
+                           alignment: overlay the two nominally-geocoded detection
+                           sets as-is (identity) and take the agreement
+    3. traditional_icp  -- cross-modal fusion with classic ICP registration
+    4. proposed         -- RANSAC init -> CPD refine -> cross-modal confidence
 
-Crucially, ``traditional_icp`` and ``proposed`` share the *identical* cross-modal
-validation / confidence stage and decision threshold -- they differ ONLY in the
-registration step (ICP vs RANSAC+CPD). Any gap between them is therefore
-attributable to the registration method, which is the comparison the task asks
-for. ``optical_only`` shows why cross-modal validation is worth doing at all.
+Crucially, ``no_alignment``, ``traditional_icp`` and ``proposed`` share the
+*identical* cross-modal validation / confidence stage and decision threshold --
+they differ ONLY in the registration step (none / ICP / RANSAC+CPD). Any gap is
+therefore attributable to the alignment method. ``no_alignment`` is the key
+comparison: it is exactly the conventional method *without the point-set alignment
+that is this project's contribution*. ``optical_only`` shows why cross-modal
+validation is worth doing at all.
 
 Outputs (figures + machine-readable metrics) land in ``results/``.
 
@@ -29,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.baseline import run_optical_only, run_traditional
+from src.baseline import run_no_alignment, run_optical_only, run_traditional
 from src.data_simulation import simulate_scene
 from src.evaluate import (
     best_f1,
@@ -58,16 +63,19 @@ def evaluate_all(scene, *, verbose=False):
     truth = scene.true_debris
 
     optical = run_optical_only(scene)
+    no_align = run_no_alignment(scene, match_radius=MATCH_RADIUS)
     traditional = run_traditional(scene, match_radius=MATCH_RADIUS)
     proposed = run_proposed(scene, match_radius=MATCH_RADIUS,
                             confidence_threshold=CONF_THRESHOLD, verbose=verbose)
 
     scored = {
         "optical_only": [(d.xy, d.strength) for d in scene.optical],
+        "no_alignment": _scored(no_align.fusion.candidates),
         "traditional_icp": _scored(traditional.fusion.candidates),
         "proposed": _scored(proposed.fusion.candidates),
     }
     fixed_thr = {"optical_only": OPTICAL_THRESHOLD,
+                 "no_alignment": CONF_THRESHOLD,
                  "traditional_icp": CONF_THRESHOLD,
                  "proposed": CONF_THRESHOLD}
 
@@ -77,13 +85,14 @@ def evaluate_all(scene, *, verbose=False):
             if pts else np.empty((0, 2))
         rows[name] = score_locations(sel if len(sel) else np.empty((0, 2)),
                                      truth, MATCH_RADIUS)
-    results = {"optical": optical, "traditional": traditional, "proposed": proposed}
+    results = {"optical": optical, "no_alignment": no_align,
+               "traditional": traditional, "proposed": proposed}
     return results, rows, scored
 
 
 def robustness_sweep(clutter_levels, trials=8):
     """Precision, recall & F1 vs clutter load, averaged over seeds, per method."""
-    keys = ("proposed", "traditional_icp", "optical_only")
+    keys = ("proposed", "traditional_icp", "no_alignment", "optical_only")
     out = {"x": clutter_levels}
     for metric in ("precision", "recall", "f1"):
         for k in keys:
@@ -133,7 +142,7 @@ def main():
     print("-" * 72)
     print(f"{'method':<18}{'TP':>5}{'FP':>5}{'FN':>5}"
           f"{'precision':>11}{'recall':>9}{'F1':>7}")
-    for name in ("optical_only", "traditional_icp", "proposed"):
+    for name in ("optical_only", "no_alignment", "traditional_icp", "proposed"):
         m = rows[name]
         print(f"{name:<18}{m.tp:>5}{m.fp:>5}{m.fn:>5}"
               f"{m.precision:>11.3f}{m.recall:>9.3f}{m.f1:>7.3f}")
@@ -144,7 +153,7 @@ def main():
     print("-" * 72)
     print(f"{'method':<18}{'bestF1':>8}{'precision':>11}{'recall':>9}{'@thr':>8}")
     bf1 = {}
-    for name in ("optical_only", "traditional_icp", "proposed"):
+    for name in ("optical_only", "no_alignment", "traditional_icp", "proposed"):
         b = best_f1(scored[name], scene.true_debris, MATCH_RADIUS)
         bf1[name] = b
         print(f"{name:<18}{b['f1']:>8.3f}{b['precision']:>11.3f}"
@@ -152,12 +161,15 @@ def main():
 
     rec_p, prec_p, _, ap_p = precision_recall_curve(
         results["proposed"].fusion.candidates, scene.true_debris, MATCH_RADIUS)
+    rec_n, prec_n, ap_n = strength_pr_curve(
+        scored["no_alignment"], scene.true_debris, MATCH_RADIUS)
     rec_t, prec_t, ap_t = strength_pr_curve(
         scored["traditional_icp"], scene.true_debris, MATCH_RADIUS)
     rec_o, prec_o, ap_o = strength_pr_curve(
         scored["optical_only"], scene.true_debris, MATCH_RADIUS)
     print(f"\nAverage precision (area under PR):  proposed={ap_p:.3f}  "
-          f"traditional_icp={ap_t:.3f}  optical_only={ap_o:.3f}")
+          f"traditional_icp={ap_t:.3f}  no_alignment={ap_n:.3f}  "
+          f"optical_only={ap_o:.3f}")
 
     # ---- 3. figures --------------------------------------------------------
     visualize.plot_registration(scene, results["proposed"], results["traditional"],
@@ -167,6 +179,7 @@ def main():
     visualize.plot_pr_curves(
         {"proposed": (rec_p, prec_p, ap_p),
          "traditional_icp": (rec_t, prec_t, ap_t),
+         "no_alignment": (rec_n, prec_n, ap_n),
          "optical_only": (rec_o, prec_o, ap_o)},
         RESULTS / "03_precision_recall.png")
 
@@ -175,7 +188,7 @@ def main():
     print(f"AVERAGED BENCHMARK  ({args.trials} seeds, fixed operating point)")
     print("=" * 72)
     agg = {k: {"precision": [], "recall": [], "f1": [], "ap": []}
-           for k in ("optical_only", "traditional_icp", "proposed")}
+           for k in ("optical_only", "no_alignment", "traditional_icp", "proposed")}
     for s in range(args.trials):
         sc = simulate_scene(seed=200 + s)
         res, r, sco = evaluate_all(sc)
@@ -186,15 +199,14 @@ def main():
         agg["proposed"]["ap"].append(
             precision_recall_curve(res["proposed"].fusion.candidates,
                                    sc.true_debris, MATCH_RADIUS)[3])
-        agg["traditional_icp"]["ap"].append(
-            strength_pr_curve(sco["traditional_icp"], sc.true_debris, MATCH_RADIUS)[2])
-        agg["optical_only"]["ap"].append(
-            strength_pr_curve(sco["optical_only"], sc.true_debris, MATCH_RADIUS)[2])
+        for k in ("no_alignment", "traditional_icp", "optical_only"):
+            agg[k]["ap"].append(
+                strength_pr_curve(sco[k], sc.true_debris, MATCH_RADIUS)[2])
 
     print(f"{'method':<18}{'precision':>13}{'recall':>13}{'F1':>13}{'AP':>8}")
     print("-" * 65)
     bench = {}
-    for k in ("optical_only", "traditional_icp", "proposed"):
+    for k in ("optical_only", "no_alignment", "traditional_icp", "proposed"):
         def ms(x): return (float(np.mean(x)), float(np.std(x)))
         p, ps = ms(agg[k]["precision"]); r, rs = ms(agg[k]["recall"])
         f, fs = ms(agg[k]["f1"]); a, _ = ms(agg[k]["ap"])
@@ -211,16 +223,18 @@ def main():
     sweep = robustness_sweep([5, 15, 30, 50, 75], trials=8)
     visualize.plot_robustness(sweep, RESULTS / "04_robustness.png")
     print("precision vs clutter load %s :" % sweep["x"])
-    for k in ("optical_only", "traditional_icp", "proposed"):
+    for k in ("optical_only", "no_alignment", "traditional_icp", "proposed"):
         print(f"  {k:<16}", [round(v, 3) for v in sweep[f"{k}_precision"]])
 
     # ---- 6. persist a machine-readable report ------------------------------
     report = {
         "single_scene": {name: rows[name].as_row()
-                         for name in ("optical_only", "traditional_icp", "proposed")},
+                         for name in ("optical_only", "no_alignment",
+                                      "traditional_icp", "proposed")},
         "single_scene_best_f1": bf1,
         "average_precision_single": {"proposed": round(ap_p, 3),
                                      "traditional_icp": round(ap_t, 3),
+                                     "no_alignment": round(ap_n, 3),
                                      "optical_only": round(ap_o, 3)},
         "averaged_benchmark": bench,
         "robustness_sweep": sweep,
