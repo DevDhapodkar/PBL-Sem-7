@@ -1,25 +1,26 @@
 # Cross-Modal Sentinel-1 / Sentinel-2 Debris Detection — Water Bodies of Nagpur
 
-**A research prototype that detects floating debris / matter on Nagpur's lakes by
+**A research prototype that detects floating debris and macro-matter on Nagpur's lakes by
 fusing Sentinel-1 SAR and Sentinel-2 optical satellite data through a
 RANSAC-initialised Coherent Point Drift (CPD) cross-modal validation pipeline —
-benchmarked against the traditional ICP method.**
+benchmarked against the traditional ICP method and single-sensor optical baselines.**
 
-> Runs on **real, live Sentinel-2 imagery** of the Nagpur lakes (read straight
-> from the Copernicus/AWS open bucket) plus a paired Sentinel-1 view, and ships
-> an interactive dashboard and a reproducible benchmark.
+> Runs on **real, live Sentinel-2 L2A imagery** of the Nagpur lakes (read straight
+> from the Copernicus/AWS open COG bucket) paired with **live Sentinel-1 RTC SAR**
+> (via Microsoft Planetary Computer / Google Earth Engine, or an offline drift stand-in),
+> and ships an interactive Streamlit dashboard, CLI overlay utility, and reproducible benchmark suite.
 
 ---
 
 ## Table of contents
 1. [What this project does](#1-what-this-project-does)
 2. [Why Nagpur's water bodies](#2-why-nagpurs-water-bodies)
-3. [Live satellite data](#3-live-satellite-data)
+3. [Live satellite data & acquisition techniques](#3-live-satellite-data--acquisition-techniques)
 4. [System flowchart](#4-system-flowchart)
-5. [Algorithms](#5-algorithms)
-6. [Methodology — the three-stage pipeline](#6-methodology--the-three-stage-pipeline)
-7. [The interactive dashboard (screenshots)](#7-the-interactive-dashboard-screenshots)
-8. [Results](#8-results)
+5. [Remote sensing & registration techniques](#5-remote-sensing--registration-techniques)
+6. [Methodology — the three-stage pipeline & mathematical formulation](#6-methodology--the-three-stage-pipeline--mathematical-formulation)
+7. [The interactive dashboard (screenshots & modes)](#7-the-interactive-dashboard-screenshots--modes)
+8. [Evaluation protocol & benchmark results](#8-evaluation-protocol--benchmark-results)
 9. [Conclusions](#9-conclusions)
 10. [Quick start](#10-quick-start)
 11. [Repository layout](#11-repository-layout)
@@ -30,67 +31,63 @@ benchmarked against the traditional ICP method.**
 
 ## 1. What this project does
 
-Floating matter on inland lakes — **water hyacinth, algal scum, plastic and mixed
-trash rafts, shoreline litter** — is visible to two very different Sentinel
+Floating matter on inland lakes — **water hyacinth blooms, algal scum, plastic and mixed
+trash rafts, shoreline litter** — is visible to two physically distinct Sentinel
 sensors:
 
-* **Sentinel-2 (optical)** sees it through its **spectral** signature (a
-  vegetation-like NIR bump, or a plastic/debris index).
-* **Sentinel-1 (SAR)** sees it through the way it **modulates the water-surface
-  roughness** (a backscatter anomaly).
+* **Sentinel-2 (Multi-Spectral Optical)** detects floating matter through its **spectral** signature:
+  a Near-Infrared (NIR) vegetation bump (`NDVI`) or a sub-pixel NIR peak above the Red-Edge to Short-Wave Infrared baseline (`FDI` — Floating Debris Index).
+  * *Single-sensor false alarms:* sun-glint, turbid sediment plumes, thin cloud/haze, and shallow bottom reflectance.
+* **Sentinel-1 (C-Band Synthetic Aperture Radar — SAR)** detects floating matter through the way it **modulates water-surface roughness**:
+  floating mats alter capillary/Bragg waves and produce localized radar backscatter anomalies in VV/VH polarization.
+  * *Single-sensor false alarms:* boats/wakes, wind streaks, and shoreline double-bounce radar returns.
 
-Each sensor alone raises **false alarms** the other does not: optical sun-glint /
-turbid water vs. SAR boats / wind streaks. The core idea of this project is to run
-an **independent detector on each modality**, turn the detections into
-**object-level point sets**, and then use the **spatial agreement** between the
-two — after a robust cross-modal registration — as a **debris-validation**
-mechanism. A detection corroborated by *both* sensors is confident debris; a
-single-sensor detection is most likely an artifact.
+Each sensor alone raises **modality-specific false alarms** that the other does not. The core idea of this project is to:
+1. Run an **independent detector on each modality** and convert pixel anomalies into **object-level point sets** (centroids + detection strengths).
+2. Align the two point sets using a **robust two-stage registration (RANSAC $\rightarrow$ Rigid CPD)** to compensate for **inter-pass surface drift** (since S1 and S2 image at different times) and residual co-registration offsets.
+3. Use the **post-registration spatial agreement** between the two sensors as a **cross-modal debris validation** mechanism gated by global registration quality.
 
-The registration is the hard part (the two point sets are noisy, incomplete, full
-of modality-specific outliers, and slightly mis-registered), and it is where the
-method’s contribution lies:
-
-```
-Stage 1  RANSAC  →  robust initial alignment + reject outlier correspondences
-Stage 2  CPD     →  probabilistic refinement of the alignment
-Stage 3  Fusion  →  registration-gated cross-modal confidence  C  →  debris map
+```text
+Stage 0  Putative Matching  →  Mutual-Nearest-Neighbours (geocoded) or Shape-Context Descriptors
+Stage 1  RANSAC + Umeyama   →  Robust coarse similarity alignment T₀ + gross outlier rejection
+Stage 2  Rigid CPD (EM)     →  Probabilistic GMM refinement T = T_CPD ∘ T₀ with uniform clutter absorption
+Stage 3  Cross-Modal Fusion →  Registration-gated confidence C = f(D_reg, N_match, S_SAR, S_opt) → Debris map
 ```
 
-We compare this against the **traditional method** (ICP registration) and a
-**single-modality** baseline (optical only).
+We compare this proposed pipeline against the **traditional method** (classical Iterative Closest Point — **ICP** registration sharing the exact same Stage 3 fusion) and a **single-modality** baseline (**optical-only**).
 
 ---
 
 ## 2. Why Nagpur's water bodies
 
 Nagpur, the "City of Lakes" (Maharashtra, India), has a set of historic tanks and
-reservoirs that suffer from **water-hyacinth blooms, sewage-driven algal scum and
+reservoirs that suffer from **water-hyacinth proliferation, sewage-driven algal scum, and
 floating solid waste** — a real, local environmental-monitoring problem well
-suited to satellite fusion. All the lakes fall inside a **single Sentinel-2 MGRS
-tile, `44QKJ`** (UTM zone 44N), which the pipeline reads directly.
+suited to satellite fusion. All major lakes fall inside a **single Sentinel-2 MGRS
+tile, `44QKJ`** (UTM zone 44N / `EPSG:32644`), which the pipeline reads directly.
 
-| Lake | Approx. centre (lat, lon) | Notes |
-|------|---------------------------|-------|
-| Ambazari Lake | 21.131, 79.043 | largest lake; feeds the Nag river |
-| Futala Lake | 21.150, 79.045 | central, recreational |
-| Gorewada Lake | 21.204, 79.030 | northern drinking-water reservoir |
-| Gandhisagar (Shukrawari) | 21.153, 79.100 | historic tank, old city |
-| Sonegaon Lake | 21.101, 79.053 | south-west |
-| Telangkhedi Lake | 21.155, 79.053 | near Seminary Hills |
-| Sakkardara Lake | 21.125, 79.118 | historic tank, east |
-| Naik Lake | 21.136, 79.108 | small urban tank, weed-prone |
+| Lake | Approx. centre (lat, lon) | Window size (10 m px) | Notes |
+|------|---------------------------|:---------------------:|-------|
+| **Ambazari Lake** | `21.131, 79.043` | ~220 × 220 | Largest lake; feeds the Nag river; prone to western-shore hyacinth mats |
+| **Futala Lake** | `21.150, 79.045` | ~110 × 110 | Central urban recreational tank |
+| **Gorewada Lake** | `21.204, 79.030` | ~200 × 200 | Northern drinking-water reservoir |
+| **Gandhisagar (Shukrawari)** | `21.153, 79.100` | ~90 × 90 | Historic rectangular tank in the old city |
+| **Sonegaon Lake** | `21.101, 79.053` | ~90 × 90 | South-west urban lake |
+| **Telangkhedi Lake** | `21.155, 79.053` | ~110 × 110 | Near Seminary Hills |
+| **Sakkardara Lake** | `21.125, 79.118` | ~80 × 80 | Historic tank, east |
+| **Naik Lake** | `21.136, 79.108` | ~70 × 70 | Small urban tank, weed-prone |
 
-Coordinates and windows live in [`src/nagpur.py`](src/nagpur.py).
+Coordinates and bounding boxes are configured in [`src/nagpur.py`](src/nagpur.py).
 
 ---
 
-## 3. Live satellite data
+## 3. Live satellite data & acquisition techniques
 
-| Modality | Product | Source | Live status |
-|----------|---------|--------|-------------|
-| **Sentinel-2 (optical)** | L2A surface reflectance (COG) | public AWS bucket `sentinel-cogs` (Copernicus mirror), tile `44QKJ` | ✅ **Real & live** — read directly by `src/acquire.py::fetch_sentinel2` (GDAL `/vsicurl` range reads; no credentials). Five Nagpur lakes are also **bundled** in `data/` so the app works offline. |
-| **Sentinel-1 (SAR)** | GRD VV/VH (γ⁰, dB) | Google Earth Engine `COPERNICUS/S1_GRD` | ⚙️ **Real via `src/acquire.py::fetch_sentinel1_ee`** on your machine (one-time `earthengine authenticate`). Where the S1 endpoints are blocked (e.g. this project's build sandbox), the SAR point set is **derived from the real optical detections** as an independent, noisy, mis-registered sample + SAR clutter, so the cross-modal demo runs on the real optical scene. Clearly labelled in the app. |
+| Modality | Product | Source & Technique | Live status |
+|----------|---------|--------------------|-------------|
+| **Sentinel-2 (Optical)** | L2A surface reflectance (`B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL`) | Public AWS Open Data bucket `s3://sentinel-cogs` (Copernicus mirror), MGRS tile `44QKJ` | ✅ **Real & live** — streamed directly by [`src/acquire.py`](src/acquire.py) via GDAL `/vsicurl` HTTP byte-range reads (no credentials required). `fetch_latest_clear_s2` scans backward from today and checks the L2A `SCL` cloud mask to pull the newest clear pass. Five Nagpur lakes are also **bundled** in `data/nagpur_<key>_s2.npz` for offline use. |
+| **Sentinel-1 (SAR — Live RTC)** | Radiometrically Terrain-Corrected (RTC) VV/VH backscatter ($\gamma^0$, dB) | **Microsoft Planetary Computer** STAC (`sentinel-1-rtc`) | ✅ **Real & live** — [`fetch_latest_s1_pc`](src/acquire.py) queries Planetary Computer anonymously, signs asset URLs via `planetary-computer`, and warps VV/VH onto the exact 10 m optical grid using `rioxarray`. |
+| **Sentinel-1 (SAR — GEE / Stand-in)** | GRD VV/VH ($\gamma^0$, dB) or derived drift point cloud | **Google Earth Engine** (`COPERNICUS/S1_GRD`) or [`simulate_sar_pointset`](src/detect_real.py) | ⚙️ **Real via `fetch_sentinel1_ee`** (with `earthengine authenticate`), or **offline stand-in** where an independent, noisy, drifted SAR sample + shoreline clutter is derived from the real optical detections to enable quantitative Precision/Recall benchmarking. |
 
 The bundled scenes are genuine Sentinel-2 L2A windows over each lake (e.g. Ambazari
 = `S2A_44QKJ_20240108`, 2024-01-08). The image below is **real Sentinel-2 data**
@@ -120,32 +117,25 @@ sensors can be matched:
 optical, and the ~30 debris seen by **both** sensors are ringed in yellow. The
 script reports the estimated drift (here ≈ 100 m) and the S1–S2 time gap.*
 
-> **Sentinel-1 note.** With `--s1 pc` the script pulls **real** Sentinel-1 RTC from
-> Microsoft Planetary Computer (anonymous, no account — `pip install pystac-client
-> planetary-computer rioxarray`). Where the S1 endpoint is unreachable (e.g. this
-> repo's build sandbox), it falls back to an S1 view **derived from the real
-> optical detections** (an independent, drifted sample), clearly labelled — so the
-> overlay above still runs on the **real, latest Sentinel-2** scene.
-
 ---
 
 ## 4. System flowchart
 
 ```mermaid
 flowchart TD
-    A1["Sentinel-1 GRD<br/>VV / VH backscatter"] --> B1["SAR debris detector<br/>(CFAR / backscatter anomaly on water)"]
-    A2["Sentinel-2 L2A<br/>Green, Red, RE, NIR, SWIR"] --> B2["Optical debris detector<br/>NDWI water mask + NDVI / FDI"]
-    B1 --> C1["SAR point set<br/>{xᵢ, sᴵᴬᴿ}"]
-    B2 --> C2["Optical point set<br/>{yⱼ, sᵒᵖᵗ}"]
+    A1["Sentinel-1 GRD / RTC<br/>VV / VH backscatter"] --> B1["SAR debris detector<br/>(CFAR local-contrast anomaly on water)"]
+    A2["Sentinel-2 L2A<br/>Green, Red, RE2, NIR, SWIR1"] --> B2["Optical debris detector<br/>NDWI water mask + shoreline collar + NDVI ∪ FDI"]
+    B1 --> C1["SAR point set<br/>{xᵢ, sᵢˢᵃʳ}"]
+    B2 --> C2["Optical point set<br/>{yⱼ, sⱼᵒᵖᵗ}"]
 
-    C1 --> D["Stage 1 · RANSAC<br/>robust initial similarity T₀<br/>+ reject outlier matches"]
+    C1 --> D["Stage 1 · RANSAC + Umeyama SVD<br/>robust initial similarity T₀<br/>+ reject outlier correspondences"]
     C2 --> D
-    D --> E["Stage 2 · CPD (rigid)<br/>refine alignment T = T_CPD∘T₀<br/>uniform term absorbs clutter"]
-    E --> F["Stage 3 · Cross-modal validation<br/>match registered detections<br/>gate by registration quality Q_reg"]
-    F --> G["Confidence per object<br/>C = f(D_reg, N_match, Sᴵᴬᴿ, Sᵒᵖᵗ)"]
-    G --> H{"C > T ?"}
-    H -- yes --> I["✅ Debris (corroborated)"]
-    H -- no  --> J["✗ Likely single-sensor artifact"]
+    D --> E["Stage 2 · Coherent Point Drift (Rigid EM)<br/>refine alignment T = T_CPD ∘ T₀<br/>uniform weight w absorbs clutter"]
+    E --> F["Stage 3 · Cross-modal validation<br/>mutual-NN matching within match_radius<br/>gate by registration quality Q_reg"]
+    F --> G["Confidence per candidate<br/>Cᵢ = f(D_reg, N_match, sᵢˢᵃʳ, sⱼᵒᵖᵗ)"]
+    G --> H{"Cᵢ ≥ T ?"}
+    H -- yes --> I["✅ Validated Debris (corroborated)"]
+    H -- no  --> J["✗ Rejected (single-sensor artifact)"]
 
     style D fill:#e3f2fd,stroke:#1565c0
     style E fill:#e8f5e9,stroke:#2e7d32
@@ -153,86 +143,91 @@ flowchart TD
     style I fill:#c8e6c9,stroke:#2e7d32
 ```
 
-**Traditional method (baseline):** identical, except Stages 1–2 are replaced by a
-single **ICP** registration (no outlier model) — isolating the contribution of
-RANSAC+CPD, because Stage 3 is unchanged.
+**Traditional method (baseline):** identical architecture, except Stages 1–2 are replaced by a
+single **ICP** registration (cold-started at identity, no outlier model) — isolating the exact contribution of
+RANSAC+CPD because Stage 3 is held fixed.
 
 ---
 
-## 5. Algorithms
+## 5. Remote sensing & registration techniques
 
-All three registration algorithms are implemented from scratch (numpy/scipy only)
-in [`src/registration.py`](src/registration.py).
+### 5.1 Remote sensing detectors $\rightarrow$ Object point sets ([`src/detect_real.py`](src/detect_real.py))
+Working at the **object level** rather than raw pixels is deliberate: floating debris forms discrete rafts/mats, S1 and S2 have different spatial characteristics and revisit times, and point-set registration naturally aligns discrete object clouds under drift and outlier contamination.
 
-### 5.1 Detectors → point sets ([`src/detect_real.py`](src/detect_real.py))
-* **NDWI** = (Green − NIR)/(Green + NIR) → water mask (McFeeters 1996).
-* **NDVI** = (NIR − Red)/(NIR + Red) → floating vegetation / hyacinth / scum on water.
-* **FDI** (Floating Debris Index, Biermann 2020) = NIR − baseline(RE, SWIR) → plastic / trash.
-* **SAR backscatter anomaly** = CFAR-style local-contrast test on VV over water.
-* Connected components of the anomaly masks → **blob centroids = point sets**, index value → strength.
+1. **Water Masking — NDWI (McFeeters, 1996) + Morphological Dilation:**
+   $$\text{NDWI} = \frac{\text{Green (B03)} - \text{NIR (B08)}}{\text{Green (B03)} + \text{NIR (B08)}}$$
+   Pixels with $\text{NDWI} > -0.05$ are classified as open water, cleaned with binary opening/closing, and expanded by a 1-pixel (10 m) morphological dilation collar to include shoreline-accumulated litter.
+2. **Floating Vegetation / Algal Scum — NDVI:**
+   $$\text{NDVI} = \frac{\text{NIR (B08)} - \text{Red (B04)}}{\text{NIR (B08)} + \text{Red (B04)}}$$
+   Flags chlorophyll-rich hyacinth mats and surface scum on water ($\text{NDVI} > 0.08$).
+3. **Floating Plastic / Macro-Debris — FDI (Biermann et al., 2020):**
+   $$\text{FDI} = R_{\text{NIR (B08)}} - \left[ R_{\text{RE2 (B06)}} + \left(R_{\text{SWIR1 (B11)}} - R_{\text{RE2 (B06)}}\right) \cdot \frac{\lambda_{\text{NIR}} - \lambda_{\text{Red}}}{\lambda_{\text{SWIR1}} - \lambda_{\text{Red}}} \cdot 10 \right]$$
+   Captures the NIR reflectance spike above the Red-Edge (740 nm) to SWIR (1610 nm) baseline caused by floating plastic and non-vegetative debris ($\text{FDI} > 0.012$).
+4. **SAR Roughness Anomaly — CFAR-Style Local Contrast Detector:**
+   Over water pixels on Sentinel-1 VV backscatter, computes a sliding $9 \times 9$ local median $\mu_{\text{med}}$ and fast box-filter local standard deviation $\sigma_{\text{local}} = \sqrt{\mathbb{E}[\text{VV}^2] - \mathbb{E}[\text{VV}]^2}$:
+   $$|\text{VV} - \mu_{\text{med}}| > k \cdot \sigma_{\text{local}} \quad (k = 2.5)$$
+5. **Connected-Component Extraction (`_blobs`):**
+   8-connected components of the binary anomaly masks (filtered by minimum/maximum blob area) are reduced to **intensity-weighted centroids** $\mathbf{x}_i, \mathbf{y}_j \in \mathbb{R}^2$ and normalized strengths $s_i^{\text{SAR}}, s_j^{\text{opt}} \in [0, 1]$.
 
-### 5.2 RANSAC (Stage 1) — robust estimation
-Repeatedly samples 2 putative correspondences, fits a similarity transform in
-closed form (**Umeyama 1991**), scores inliers by residual, keeps the largest
-consensus set, and refits on all inliers. Putative correspondences come from
-**spatial mutual-nearest-neighbours** (valid because Sentinel products are
-geocoded — the mis-registration is a small *residual*); shape-context descriptors
-are provided for the large-transform case. RANSAC’s explicit inlier/outlier split
-is exactly what ICP lacks.
+### 5.2 Putative correspondence techniques ([`src/registration.py`](src/registration.py))
+* **Spatial Mutual-Nearest-Neighbours (`spatial_putative_matches`):** Default for geocoded Sentinel passes where inter-pass drift is a bounded residual offset. Uses `scipy.spatial.cKDTree` to pair points $(i, j)$ that are mutual nearest neighbours within `putative_radius`.
+* **Rotation/Scale-Invariant Shape-Context Descriptors (`shape_context_descriptors` + `putative_matches`):** For un-geocoded scenes with large arbitrary transforms, describes each point by the sorted, mean-normalized distances to its $k$ nearest neighbours, matched in descriptor space using mutual-NN and **Lowe's second-nearest neighbour ratio test** ($\text{ratio} \le 0.95$).
 
-### 5.3 Coherent Point Drift (Stage 2) — probabilistic registration
-CPD (**Myronenko & Song 2010**) treats one point set as a Gaussian-Mixture whose
-centroids move *coherently* to fit the other, with a **uniform component (weight
-`w`)** that absorbs outliers. We use the **rigid** variant (rotation + translation)
-warm-started by the RANSAC transform — RANSAC already fixed scale, and rigid CPD
-avoids the scale-shrink degeneracy. EM soft-assigns correspondences (no hard
-snap), so noisy detections contribute partially.
+### 5.3 Stage 1: RANSAC + Umeyama closed-form similarity (`ransac_similarity`)
+* Repeatedly samples minimal sets of 2 putative correspondences.
+* Estimates a 4-DOF 2D similarity transform (isotropic scale $s$, rotation matrix $\mathbf{R}$ with reflection guard $\det(\mathbf{U}\mathbf{V}^T)$, and translation $\mathbf{t}$) in closed form via **Umeyama's SVD theorem (1991)** (`estimate_similarity`).
+* Counts inliers within residual threshold (`ransac_threshold`), retains the largest consensus set, and refits $\mathbf{T}_0$ on all inliers.
+* **Key role:** Hard outlier rejection — prevents modality-specific clutter from biasing the initial alignment.
 
-### 5.4 ICP (traditional baseline)
-Iterative Closest Point: each iteration hard-assigns every source point to its
-nearest target and refits a similarity. **No outlier model, identity
-initialisation** — so modality-specific false positives bias the transform and
-genuine cross-modal pairs fail to overlap. This is the classical method the
-proposed pipeline is compared against.
+### 5.4 Stage 2: Coherent Point Drift (`cpd_rigid`) — probabilistic EM registration
+* Based on **Myronenko & Song (IEEE TPAMI, 2010)**, warm-started at the RANSAC transform $\mathbf{T}_0$.
+* Models the transformed SAR point set as Gaussian Mixture Model (GMM) centroids moving coherently toward the optical target distribution, with an explicit **uniform noise component weighted by $w \in [0, 1)$** (default $w = 0.4$) that absorbs residual outliers.
+* **E-step:** Computes soft correspondence probabilities $P_{mn}$ between SAR point $m$ and optical point $n$:
+  $$P_{mn} = \frac{\exp\!\left(-\frac{\|\mathbf{x}_n - \mathbf{T}(\mathbf{y}_m)\|^2}{2\sigma^2}\right)}{\sum_{k=1}^{M} \exp\!\left(-\frac{\|\mathbf{x}_n - \mathbf{T}(\mathbf{y}_k)\|^2}{2\sigma^2}\right) + (2\pi\sigma^2)^{D/2}\,\frac{w}{1 - w}\,\frac{M}{N}}$$
+* **M-step:** Solves for the rigid rotation $\mathbf{R}$, translation $\mathbf{t}$, and variance $\sigma^2$ in closed form via SVD of the soft-weighted cross-covariance matrix.
+* **Preventing Scale-Shrink Degeneracy:** Because RANSAC already estimates scale in Stage 1, CPD runs with `allow_scale=False` (pure rigid refinement), eliminating the classic GMM scale-collapse failure mode ($\sigma^2 \to 0$) while refining alignment over the full point clouds.
 
----
-
-## 6. Methodology — the three-stage pipeline
-
-The guiding principle is that **each stage has a distinct, non-redundant job**
-(RANSAC → CPD is *not* blindly stacked):
-
-| Stage | Algorithm | Job |
-|-------|-----------|-----|
-| 1 | **RANSAC** | robust **initial** transform + reject gross outlier correspondences |
-| 2 | **CPD** (rigid) | **refine** the alignment of the two full distributions; absorb residual clutter |
-| 3 | **Cross-modal validation** | match registered detections, **gate by registration quality**, emit confidence |
-
-### The confidence score
-For every candidate, after registering SAR into the optical frame and matching by
-mutual-NN within `match_radius`:
-
-```
-C = Q_reg · [ α·g + β·Sᴵᴬᴿ + γ·Sᵒᵖᵗ ]         (corroborated, α+β+γ = 1)
-C = Q_reg · penalty · S(single)                (single-sensor, discounted)
-
-Q_reg = exp(−D_reg² / 2τ²) · min(1, N_match / N_support)
-g     = exp(−d² / 2s²)      (geometric agreement of the matched pair)
-```
-
-`Q_reg` is the crux: it multiplies **every** confidence, so a **failed
-registration cannot manufacture confident debris** (if `D_reg` is large or there
-are too few coherent matches, `Q_reg → 0`). The support term *saturates* — it asks
-*"are there enough coherent cross-modal matches to trust the alignment?"*, not
-*"what fraction of detections are debris"* — so a mostly-clutter lake is not
-penalised. Full derivation and parameters: [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+### 5.5 Traditional baseline: Iterative Closest Point (`icp_rigid`)
+* Iteratively hard-assigns every SAR point to its nearest optical neighbour and refits a similarity transform from the identity initialisation.
+* Because ICP has **no outlier model** and uses hard nearest-neighbour snapping, ships, wakes, and sun-glint act as phantom attractors that drag the registration off.
 
 ---
 
-## 7. The interactive dashboard (screenshots)
+## 6. Methodology — the three-stage pipeline & mathematical formulation
 
-Run `streamlit run app.py`. Two modes: **🛰️ Nagpur — real Sentinel-2** and
-**🧪 Simulation**.
+The guiding design principle is a **strict division of labour** across stages:
+
+| Stage | Algorithm | Distinct Non-Redundant Role |
+|-------|-----------|-----------------------------|
+| **1** | **RANSAC + Umeyama** | Robust **coarse** global transform $\mathbf{T}_0$ + explicit rejection of gross outlier correspondences |
+| **2** | **Rigid CPD (EM)** | **Fine** probabilistic alignment $\mathbf{T} = \mathbf{T}_{\text{CPD}} \circ \mathbf{T}_0$ using soft global evidence; uniform term $w$ absorbs remaining clutter |
+| **3** | **Cross-Modal Validation** | Mutual-NN matching of registered points, **registration-quality gating ($Q_{\text{reg}}$)**, and confidence scoring $C_i$ |
+
+### Registration-Gated Confidence Score ([`src/fusion.py`](src/fusion.py))
+After registering SAR into the optical frame ($\tilde{\mathbf{x}}_i = \mathbf{T}(\mathbf{x}_i)$) and matching via mutual-NN within `match_radius`, each candidate is scored:
+
+$$C_i = \begin{cases} Q_{\text{reg}} \cdot \left[\alpha\,g_i + \beta\,s_i^{\text{SAR}} + \gamma\,s_i^{\text{opt}}\right] & \text{(corroborated cross-modal pair, } \alpha + \beta + \gamma = 1\text{)} \\[6pt] Q_{\text{reg}} \cdot \text{penalty} \cdot \dfrac{w_{\text{sensor}}}{\beta + \gamma} \cdot s_i^{(\text{single})} & \text{(uncorroborated single-sensor candidate)} \end{cases}$$
+
+where:
+* **Global Registration-Quality Gate:**
+  $$Q_{\text{reg}} = \exp\!\left(-\frac{D_{\text{reg}}^2}{2\tau^2}\right) \cdot \min\!\left(1, \frac{N_{\text{matches}}}{N_{\text{support}}}\right)$$
+* **Geometric Pair Agreement:**
+  $$g_i = \exp\!\left(-\frac{d_i^2}{2s_{\text{geom}}^2}\right), \quad d_i = \|\tilde{\mathbf{x}}_i - \mathbf{y}_j\|_2, \quad s_{\text{geom}} = \frac{\text{match\_radius}}{2}$$
+* $D_{\text{reg}} = \sqrt{\frac{1}{N_{\text{matches}}}\sum d_i^2}$ is the global post-registration RMSE across matched pairs.
+* Default parameters: $\alpha = 0.45$, $\beta = 0.275$, $\gamma = 0.275$, $\tau = 25.0$, $N_{\text{support}} = 6$, $\text{penalty} = 0.35$, decision threshold $T = 0.30$.
+
+**Why $Q_{\text{reg}}$ is essential:** It multiplies **every** candidate's confidence. If the two sensors cannot be aligned ($D_{\text{reg}}$ is large) or too few objects corroborate ($N_{\text{matches}} < N_{\text{support}}$), $Q_{\text{reg}} \to 0$, ensuring a failed registration cannot manufacture confident debris. Full derivation: [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+
+---
+
+## 7. The interactive dashboard (screenshots & modes)
+
+Run `streamlit run app.py`. The sidebar offers two primary data modes:
+* **🛰️ Nagpur — real Sentinel-2** (with choice of **📡 Microsoft Planetary Computer (live)** SAR or **⚙️ Derived from optical (offline stand-in)** SAR)
+* **🧪 Simulation** (parametric synthetic benchmark)
+
+> **Note on Live vs. Stand-in / Simulation Precision–Recall Graphs:**
+> When running with **both live Sentinel-2 and live Sentinel-1 (Planetary Computer)**, real-time satellite feeds do not come with pre-annotated human ground-truth labels (`true_debris` is empty). In that live regime, inspect detections and drift in the **🛰️ S1×S2 overlay** and **🎯 Debris confidence** tabs. To evaluate quantitative Precision/Recall/F1 tables and PR curves on real lake scenes, switch the SAR source dropdown to **⚙️ Derived from optical (offline stand-in)** or switch to **🧪 Simulation** mode.
 
 ### Nagpur mode — lake, detections, and live scorecard
 ![Dashboard — Nagpur scene](docs/img/dashboard_nagpur.png)
@@ -260,7 +255,9 @@ precision. The proposed method (RANSAC+CPD) dominates the high-precision region.
 
 ---
 
-## 8. Results
+## 8. Evaluation protocol & benchmark results
+
+Implemented in [`src/evaluate.py`](src/evaluate.py), reported debris locations are matched one-to-one against ground-truth locations within `match_radius` via a greedy `cKDTree` search (`score_locations`) to compute $TP$, $FP$, $FN$, Precision, Recall, $F_1$, threshold-swept Precision–Recall curves, and trapezoidal Average Precision ($\text{AP}$).
 
 ### 8.1 Real Nagpur lakes (Sentinel-2 optical real; SAR paired; averaged over SAR realisations)
 
@@ -274,7 +271,7 @@ precision. The proposed method (RANSAC+CPD) dominates the high-precision region.
 | | **proposed (RANSAC+CPD)** | **0.96** | **0.79** | **0.87** |
 | **Futala** | optical-only | 0.81 | 1.00\* | 0.89 |
 | | traditional (ICP) | 0.89 | 0.74 | 0.80 |
-| | **proposed (RANSAC+CPD)** | 0.89 | 0.74 | 0.80 |
+| | **proposed (RANSAC+CPD)** | **0.89** | **0.74** | **0.80** |
 
 *Ground truth = floating matter visible to **both** sensors (the *corroborable*
 objects). \*Optical-only trivially reaches recall ≈ 1 because that truth set is a
@@ -395,7 +392,7 @@ python fetch_and_overlay.py --lake gorewada --s1 pc    # force real S1 (Planetar
 ### Manual (if you prefer)
 
 ```bash
-pip install -r requirements.txt          # numpy, scipy, matplotlib, streamlit, rasterio, pyproj
+pip install -r requirements.txt          # numpy, scipy, matplotlib, streamlit, rasterio, pyproj, pystac-client, planetary-computer, rioxarray
 
 streamlit run app.py                     # ⭐ dashboard (Nagpur real S2 + Simulation modes)
 python run_demo.py                       # controlled benchmark → results/ (figures + metrics.json)
@@ -411,35 +408,36 @@ bs = fetch_sentinel2(get_lake("gorewada"), year=2024, month=3)   # reads the pub
 print(bs.meta)          # {'scene': 'S2A_44QKJ_...', 'date': '2024-03-..', 'live': True, ...}
 ```
 
-For **live Sentinel-1** (your machine): `earthengine authenticate`, then
-`src/acquire.py::fetch_sentinel1_ee`. See [`docs/DATA.md`](docs/DATA.md).
+For **live Sentinel-1** via Planetary Computer or Earth Engine, see [`docs/DATA.md`](docs/DATA.md).
 
 ---
 
 ## 11. Repository layout
 
-```
+```text
 src/
   nagpur.py            Nagpur lake AOIs + Sentinel-2 tile (44QKJ) constants
-  acquire.py           live Sentinel-2 (public COG bucket) + Sentinel-1 (Earth Engine) acquisition; cache loader
-  detect_real.py       real detectors: NDWI water mask, NDVI/FDI floating matter, SAR anomaly -> point sets
+  acquire.py           live Sentinel-2 (AWS COG) + Sentinel-1 (Planetary Computer RTC & Earth Engine); cache loader
+  detect_real.py       real detectors: NDWI water mask, NDVI/FDI floating matter, CFAR SAR anomaly -> point sets
   detection.py         generic detector interface (Detection records)
   data_simulation.py   synthetic S1/S2 scenes for controlled testing
-  registration.py      RANSAC, CPD (rigid), ICP, Umeyama, spatial/shape-context matching
+  registration.py      RANSAC, CPD (rigid EM), ICP, Umeyama SVD, spatial Mutual-NN & shape-context matching
   fusion.py            cross-modal validation + registration-gated confidence C
   pipeline.py          proposed pipeline: RANSAC -> CPD -> fusion
   baseline.py          traditional (ICP) and optical-only baselines
-  evaluate.py          precision/recall/F1, PR curves, average precision
-  visualize.py         pipeline figures
-  visualize_nagpur.py  real-data (lake imagery) figures
+  evaluate.py          KD-tree greedy matching, precision/recall/F1, PR curves, average precision
+  visualize.py         pipeline & benchmark figures
+  visualize_nagpur.py  real-data (lake imagery, spectral indices, drift overlays) figures
 data/                  bundled REAL Sentinel-2 scenes for 5 Nagpur lakes (offline-safe)
+notebooks/             zero-setup Google Colab notebook for live S1×S2 overlay
 app.py                 interactive Streamlit dashboard (Nagpur real S2 + Simulation)
-run_demo.py            controlled benchmark + figures
-tests/test_pipeline.py unit / integration tests
+fetch_and_overlay.py   CLI script for latest-S1 × latest-clear-S2 drift-corrected overlay
+run_demo.py            controlled benchmark + clutter-robustness sweep
+tests/test_pipeline.py unit / integration test suite
 docs/
   METHODOLOGY.md       algorithms + confidence function in detail
   NOVELTY.md           novelty claim + prior-art plan and preliminary findings
-  DATA.md              data-acquisition guide (S2 COG bucket, S1 via Earth Engine)
+  DATA.md              data-acquisition guide (S2 COG bucket, S1 via Planetary Computer & Earth Engine)
   img/                 README figures & dashboard screenshots
 ```
 
@@ -447,20 +445,10 @@ docs/
 
 ## 12. Limitations & future work
 
-* **Sentinel-1 in this hosted build is simulated from the real optical scene**
-  (the S1 endpoints are blocked by the sandbox's network policy). The real
-  Earth-Engine S1 path is implemented — run it where EE is reachable for a
-  fully-live cross-modal result.
-* **No field-validated debris labels yet.** Ground truth here is the
-  both-sensors-agree set / synthetic truth. Validate against annotated data
-  (MARIDA-style, or in-situ Nagpur surveys) before any operational claim.
-* **Detectors are index-threshold based.** NDWI/NDVI/FDI thresholds are literature
-  defaults, not tuned per lake or season; a learned detector (random forest / CNN)
-  would improve the point sets that feed the pipeline.
-* **Absolute numbers are illustrative**, not operational metrics; the **relative**
-  ordering of the methods is the result.
-* **Prior-art search** in `docs/NOVELTY.md` must be completed before any
-  paper/patent novelty language.
+* **No field-validated debris labels on live passes.** In live S1+S2 mode, the system validates cross-sensor corroboration and estimates drift, whereas quantitative PR curves rely on the derived stand-in or synthetic ground truth. Future work should validate against in-situ Nagpur lake surveys or annotated benchmarks (e.g. MARIDA).
+* **Detectors are index-threshold based.** NDWI/NDVI/FDI and CFAR thresholds are literature defaults; a learned segmentation model (Random Forest / U-Net) would improve candidate generation prior to point-set registration.
+* **Absolute numbers are illustrative**, not operational metrics; the **relative** ordering of the methods under identical fusion is the primary benchmark finding.
+* **Prior-art search** in [`docs/NOVELTY.md`](docs/NOVELTY.md) must be completed before any paper/patent novelty claim.
 
 ---
 
@@ -471,7 +459,7 @@ docs/
 * S. Umeyama. *Least-squares estimation of transformation parameters between two point patterns.* IEEE TPAMI, 1991.
 * L. Biermann et al. *Finding Plastic Patches in Coastal Waters using Optical Satellite Data (FDI).* Scientific Reports, 2020.
 * S. K. McFeeters. *The use of the NDWI in the delineation of open water features.* Int. J. Remote Sensing, 1996.
-* Copernicus Sentinel data (ESA); Sentinel-2 L2A COGs via the AWS `sentinel-cogs` Open Data bucket.
+* Copernicus Sentinel data (ESA); Sentinel-2 L2A COGs via the AWS `sentinel-cogs` Open Data bucket; Sentinel-1 RTC via Microsoft Planetary Computer.
 
 ---
 
