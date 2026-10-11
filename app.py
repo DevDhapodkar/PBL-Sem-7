@@ -68,10 +68,11 @@ st.sidebar.divider()
 # Cached compute
 # ===========================================================================
 @st.cache_data(show_spinner="Loading Sentinel data & running pipeline…")
-def compute_nagpur(lake_key, seed, match_radius, live_latest=False):
+def compute_nagpur(lake_key, seed, match_radius, live_latest=True, s1_mode="📡 Microsoft Planetary Computer (live)"):
     from src.nagpur import get_lake
     from src.acquire import get_nagpur_s2, fetch_latest_clear_s2
-    from src.detect_real import build_scene_from_real
+    from src.detect_real import build_scene_from_real, detect_optical, detect_sar_backscatter
+    from src.data_simulation import Scene
     lake = get_lake(lake_key)
     if live_latest:
         try:
@@ -80,7 +81,31 @@ def compute_nagpur(lake_key, seed, match_radius, live_latest=False):
             bs = get_nagpur_s2(lake)
     else:
         bs = get_nagpur_s2(lake)
-    scene, diag = build_scene_from_real(bs, seed=int(seed))
+
+    if "Planetary Computer" in s1_mode:
+        try:
+            from src.acquire import fetch_latest_s1_pc
+            s1_bs = fetch_latest_s1_pc(lake, bs)
+            opt_dets, diag = detect_optical(bs)
+            water = diag["water"]
+            sar_dets = detect_sar_backscatter(s1_bs, water)
+            scene = Scene(true_debris=np.empty((0, 2)), sar=sar_dets, optical=opt_dets,
+                          true_transform={"matrix_sar_to_opt": np.eye(3), "note": "live S1 PC"})
+            diag["s1_meta"] = s1_bs.meta
+            diag["mode"] = "live-s1+s2"
+            diag["meta"] = bs.meta
+        except Exception as e:
+            scene, diag = build_scene_from_real(bs, seed=int(seed))
+            diag["s1_error"] = str(e)
+            diag["s1_meta"] = {
+                "source": "Sentinel-1 (simulated stand-in; live fetch fallback)",
+                "date": "Simulated stand-in",
+                "scene": "derived",
+                "live": False,
+            }
+    else:
+        scene, diag = build_scene_from_real(bs, seed=int(seed))
+
     proposed = run_proposed(scene, putative_radius=14, ransac_threshold=4.0,
                             match_radius=match_radius)
     traditional = run_traditional(scene, match_radius=match_radius)
@@ -127,35 +152,73 @@ if mode.startswith("🛰️"):
         lake_key = st.selectbox("Nagpur water body", list(LAKES),
                                 format_func=lambda k: LAKES[k].name, index=0)
         st.caption(LAKES[lake_key].note)
-        live_latest = st.checkbox("Fetch most-recent clear scene (live)", value=False,
-                                  help="Live-fetch the newest low-cloud Sentinel-2 "
-                                       "scene from the public bucket (needs network). "
-                                       "Off = bundled real scene (offline).")
+        live_latest = st.checkbox("Fetch most-recent clear scene (live)", value=True,
+                                  help="Live-fetch the newest low-cloud Sentinel-2 scene from Planetary Computer / AWS. Uncheck for offline bundled Jan-2024 scene.")
         st.header("🛰️ Sentinel-1 pairing")
-        st.caption("Live S1 needs Earth-Engine credentials; here the SAR view is "
-                   "derived from the real optical scene (see *Method & data*).")
-        seed = st.number_input("SAR realisation seed", 0, 999, 1)
+        s1_mode = st.selectbox("SAR (Sentinel-1) source",
+                               ["📡 Microsoft Planetary Computer (live)",
+                                "⚙️ Derived from optical (offline stand-in)"],
+                               index=0)
+        seed = 1
+        if "Derived" in s1_mode:
+            seed = st.number_input("SAR realisation seed", 0, 999, 1)
         st.header("🎯 Decision")
         match_radius = st.slider("Match radius (px, 10 m)", 3.0, 12.0, 5.0, 0.5)
         conf_thr = st.slider("Confidence threshold T", 0.0, 1.0, 0.30, 0.02)
         st.divider()
-        st.caption("Real Sentinel-2 L2A · tile 44QKJ · Jan-2024 · AWS `sentinel-cogs`.")
 
     bs, scene, diag, proposed, traditional = compute_nagpur(lake_key, seed, match_radius,
-                                                            live_latest)
+                                                            live_latest, s1_mode)
     rows, scored = render_metrics(scene, proposed, traditional, match_radius,
                                   conf_thr, 0.0, report_all_optical=True)
     m_prop, m_trad, m_opt = rows["proposed"], rows["traditional_icp"], rows["optical_only"]
 
+    s1_meta = diag.get("s1_meta", {})
+    s1_date = s1_meta.get("date", "—")
+    s1_source = s1_meta.get("source", "Sentinel-1")
+    s2_date = bs.meta.get("date", "—")
+    s1_live = bool(s1_meta.get("live", False))
+
+    gap_str = None
+    try:
+        import datetime as dt
+        d1 = dt.date.fromisoformat(s1_date)
+        d2 = dt.date.fromisoformat(s2_date)
+        gap_days = abs((d2 - d1).days)
+        gap_str = f"{gap_days} days"
+    except Exception:
+        pass
+
+    with st.sidebar:
+        st.subheader("🛰️ Active Acquisitions")
+        cloud_info = f" ({bs.meta['cloud_cover']} cloud)" if "cloud_cover" in bs.meta else ""
+        s2_tag = "Live L2A" if bs.meta.get("live") and not bs.meta.get("cached") else "Bundled"
+        st.markdown(f"**Sentinel-2 Optical:** `{s2_date}` [{s2_tag}]{cloud_info}\n\n*`{bs.meta.get('scene', 'S2')[:30]}...`*")
+
+        if s1_live:
+            st.success(f"**Sentinel-1 SAR:** `{s1_date}` [Live RTC]\n\n*`{s1_meta.get('scene', 'S1 RTC')[:30]}...`*")
+        elif diag.get("s1_error"):
+            st.warning(f"⚠️ Live S1 fetch unavailable ({diag['s1_error'][:60]}...); using offline stand-in.")
+        else:
+            st.info(f"**Sentinel-1 SAR:** `{s1_date}` [{s1_source}]")
+
+        if gap_str:
+            st.info(f"⏱️ **Acquisition Gap:** `{gap_str}` apart")
+        st.caption("Live Sentinel-2 L2A & Sentinel-1 RTC via Microsoft Planetary Computer.")
+
     st.subheader(f"{bs.meta.get('lake','Lake')} — live scorecard")
-    k = st.columns(4)
+    k = st.columns(5)
     k[0].metric("Proposed F1", f"{m_prop.f1:.2f}", f"{m_prop.f1-m_trad.f1:+.2f} vs ICP")
     k[1].metric("Proposed precision", f"{m_prop.precision:.2f}",
                 f"{m_prop.precision-m_opt.precision:+.2f} vs optical-only")
     k[2].metric("Corroborated debris", f"{proposed.fusion.n_matches}",
                 f"D_reg {proposed.fusion.d_registration:.1f}px")
-    k[3].metric("Scene", bs.meta.get("date", "—"), "real Sentinel-2")
-    st.caption(f"Real Sentinel-2 floating-matter detections: **{len(scene.optical)}** · "
+    k[3].metric("Optical (S2) Date", s2_date, "real Sentinel-2")
+    k[4].metric("SAR (S1) Date", s1_date, "live Sentinel-1 RTC" if s1_live else "offline stand-in")
+
+    gap_info = f" · acquisition gap: **{gap_str}**" if gap_str else ""
+    st.caption(f"📅 **Optical (Sentinel-2) date:** `{s2_date}` · **SAR (Sentinel-1) date:** `{s1_date}`{gap_info} · "
+               f"Real Sentinel-2 floating-matter detections: **{len(scene.optical)}** · "
                f"paired Sentinel-1 detections: **{len(scene.sar)}** · "
                f"corroborable (both sensors) ground truth: **{len(scene.true_debris)}**.")
 
@@ -164,22 +227,24 @@ if mode.startswith("🛰️"):
          "🎯 Debris confidence", "📊 Comparison", "📄 Method & data"])
 
     with t_scene:
-        st.pyplot(vn.plot_scene_overview(bs, scene, diag), width='stretch')
-        st.caption("Left: Sentinel-2 true colour with S1 (▲) and S2 (○) detections. "
+        st.pyplot(vn.plot_scene_overview(bs, scene, diag, s1_date=s1_date, s2_date=s2_date), width='stretch')
+        st.caption(f"Left: Sentinel-2 true colour (acquired **{s2_date}**) with S1 (acquired **{s1_date}**, ▲) and S2 (○) detections. "
                    "Middle: NDWI with the water mask outlined. Right: NDVI/FDI "
                    "floating-matter cue on water (hyacinth / scum / trash).")
 
     with t_overlay:
         st.pyplot(vn.plot_overlay(bs, scene, proposed,
-                                  s1_date=diag.get("meta", {}).get("date", "SAR pass"),
-                                  s2_date=bs.meta.get("date", "?")), width='stretch')
+                                  s1_date=s1_date,
+                                  s2_date=s2_date,
+                                  s1_source=s1_source), width='stretch')
         drift_px = float(np.hypot(*proposed.T_final[:2, 2]))
-        c = st.columns(3)
-        c[0].metric("Estimated drift / offset", f"~{drift_px*10:.0f} m",
-                    "S1↔S2 debris cloud")
-        c[1].metric("Registration error D_reg", f"{proposed.fusion.d_registration:.1f} px")
-        c[2].metric("Corroborated by both", proposed.fusion.n_matches)
-        st.caption("Sentinel-1 and Sentinel-2 image at different times, so floating "
+        c = st.columns(4)
+        c[0].metric("SAR (S1) date", s1_date, "fetched pass")
+        c[1].metric("Optical (S2) date", s2_date, "clear pass")
+        c[2].metric("Estimated drift", f"~{drift_px*10:.0f} m", f"offset {drift_px:.1f} px")
+        c[3].metric("Corroborated by both", proposed.fusion.n_matches, f"D_reg {proposed.fusion.d_registration:.1f} px")
+        st.caption(f"Sentinel-1 (acquired **{s1_date}**) and Sentinel-2 (acquired **{s2_date}**) "
+                   f"{f'imaged **{gap_str}** apart' if gap_str else 'image at different times'}, so floating "
                    "debris **drifts** between passes. **Left** overlays the raw "
                    "detections (offset by drift + co-registration); **right** shows "
                    "them after RANSAC+CPD registration — yellow rings mark debris "
@@ -215,6 +280,8 @@ if mode.startswith("🛰️"):
                        "(no SAR corroboration) is down-weighted.")
 
     with t_cmp:
+        if len(scene.true_debris) == 0:
+            st.info(f"ℹ️ **Live Mode Notice**: You are using live satellite imagery from both Sentinel-1 (acquired **{s1_date}**, Planetary Computer) and Sentinel-2 (acquired **{s2_date}**, AWS). Real-time satellite feeds do not come with pre-annotated ground-truth labels, so Precision/Recall metrics show 0. View detections and corroboration in the **🛰️ S1×S2 overlay** and **🎯 Debris confidence** tabs, or switch SAR source to **⚙️ Derived from optical (offline stand-in)** or **🧪 Simulation** to evaluate Precision/Recall benchmark graphs.")
         st.markdown("##### Recovery of the corroborable floating matter "
                     "(objects both sensors saw)")
         disp = {"optical-only (trust all S2)": m_opt,
@@ -248,13 +315,14 @@ if mode.startswith("🛰️"):
 #### Data
 * **Sentinel-2 L2A (optical) — real & live.** Surface-reflectance COGs read
   directly from the public AWS bucket `sentinel-cogs`, MGRS tile **44QKJ**
-  (covers all Nagpur lakes), January-2024, least-cloudy scene per lake. Current
-  scene: **{bs.meta.get('scene','—')}** ({bs.meta.get('date','—')}).
-* **Sentinel-1 GRD (SAR).** `src/acquire.py::fetch_sentinel1_ee` fetches VV/VH via
-  Google Earth Engine on your machine. In this hosted demo the S1 endpoints are
-  blocked by network policy, so the SAR point set is an **independent, noisy,
-  mis-registered sample derived from the real optical detections** (plus SAR
-  clutter). Swap in the real S1 detector for fully-live operation.
+  (covers all Nagpur lakes). Current scene: **{bs.meta.get('scene','—')}**,
+  acquired on **{s2_date}**.
+* **Sentinel-1 GRD/RTC (SAR) — {s1_source}.**
+  SAR data acquisition date: **{s1_date}**
+  (Scene: `{s1_meta.get('scene', 'derived')}`).
+  {f'Acquisition time gap between optical and SAR passes: **{gap_str}**.' if gap_str else ''}
+  Live Sentinel-1 RTC backscatter (VV/VH, γ⁰) is retrieved via Microsoft Planetary Computer (anonymous).
+  Where offline or unreachable, an independent, drifted stand-in sample is derived from the real optical detections.
 
 #### Detectors (real Sentinel-2)
 * Water mask: **NDWI** = (Green−NIR)/(Green+NIR).

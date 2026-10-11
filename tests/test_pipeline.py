@@ -134,10 +134,12 @@ def test_nagpur_real_scene_pipeline():
         return  # cache not present
     assert bs.meta.get("live")                      # it is real Sentinel-2
     assert "B08" in bs.bands and bs["B08"].ndim == 2
+    assert bs.transform is not None                 # cached scene has georeferencing transform
 
     f_prop, f_icp = [], []
     for s in range(4):
         scene, diag = build_scene_from_real(bs, seed=s)
+        assert "s1_meta" in diag and "date" in diag["s1_meta"]
         assert len(scene.optical) > 5               # real floating-matter detections
         prop = run_proposed(scene, putative_radius=14, ransac_threshold=4, match_radius=5)
         trad = run_traditional(scene, match_radius=5)
@@ -148,6 +150,67 @@ def test_nagpur_real_scene_pipeline():
         f_icp.append(score_locations(tp if len(tp) else np.empty((0, 2)),
                                      scene.true_debris, 5).f1)
     assert np.mean(f_prop) >= np.mean(f_icp)        # proposed >= ICP on real data
+
+
+def test_sar_date_propagation_and_visualizations():
+    """Verify SAR date metadata is populated and visualizer functions correctly consume it."""
+    from src.acquire import load_cached_s2
+    from src.detect_real import build_scene_from_real
+    from src import visualize_nagpur as vn
+    import matplotlib.pyplot as plt
+
+    bs = load_cached_s2("ambazari")
+    assert bs is not None
+    scene, diag = build_scene_from_real(bs, seed=1)
+    s1_meta = diag.get("s1_meta")
+    assert s1_meta is not None
+    assert "date" in s1_meta and "source" in s1_meta
+
+    # Test plot_scene_overview accepts s1_date and s2_date
+    fig1 = vn.plot_scene_overview(bs, scene, diag, s1_date="2024-01-07", s2_date="2024-01-08")
+    assert fig1 is not None
+    plt.close(fig1)
+
+    # Test plot_overlay accepts s1_date, s2_date, and s1_source
+    prop = run_proposed(scene, putative_radius=14, ransac_threshold=4, match_radius=5)
+    fig2 = vn.plot_overlay(bs, scene, prop, s1_date="2024-01-07", s2_date="2024-01-08",
+                           s1_source="Sentinel-1 RTC")
+    assert fig2 is not None
+def test_live_s2_acquisition_and_cotemporal_sar():
+    """Verify live clear Sentinel-2 acquisition and co-temporal Sentinel-1 pairing."""
+    try:
+        from src.nagpur import get_lake
+        from src.acquire import fetch_latest_clear_s2, fetch_latest_s1_pc
+        from src.detect_real import detect_optical, detect_sar_backscatter
+        import datetime as dt
+    except Exception:
+        return
+
+    lake = get_lake("ambazari")
+    try:
+        s2_bs = fetch_latest_clear_s2(lake, max_cloud=0.25)
+    except Exception:
+        return  # skip if offline / restricted network
+
+    assert s2_bs is not None
+    assert "date" in s2_bs.meta
+    assert "B08" in s2_bs.bands and s2_bs["B08"].ndim == 2
+
+    # Verify contemporary S1 SAR pairing
+    s1_bs = fetch_latest_s1_pc(lake, s2_bs)
+    assert s1_bs is not None
+    assert "date" in s1_bs.meta
+
+    d_opt = dt.date.fromisoformat(s2_bs.meta["date"])
+    d_sar = dt.date.fromisoformat(s1_bs.meta["date"])
+    gap = abs((d_sar - d_opt).days)
+    assert gap <= 14, f"Expected co-temporal acquisition gap <= 14 days, got {gap} days"
+
+    # Verify detections run on both live stacks
+    opt_dets, diag = detect_optical(s2_bs)
+    assert len(opt_dets) > 0
+    sar_dets = detect_sar_backscatter(s1_bs, diag["water"])
+    assert isinstance(sar_dets, list)
 
 
 # --------------------------------------------------------------------------

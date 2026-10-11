@@ -219,6 +219,7 @@ def build_scene_from_real(
         true_debris = np.empty((0, 2))
         tt = {"matrix_sar_to_opt": np.eye(3), "note": "fully-live: no ground truth"}
         mode = "live-s1+s2"
+        s1_meta = bs_sar.meta
     else:
         sar, tt, corroborable = simulate_sar_pointset(optical, diag["water"], seed=seed)
         # Ground truth = floating matter visible to BOTH sensors (corroborable
@@ -228,8 +229,15 @@ def build_scene_from_real(
         true_debris = (np.array([optical[i].xy for i in corroborable])
                        if corroborable else np.empty((0, 2)))
         mode = "real-s2 + simulated-s1"
+        s1_meta = {
+            "source": "Sentinel-1 (simulated from real optical)",
+            "date": "Simulated stand-in",
+            "scene": "derived",
+            "live": False,
+        }
 
     scene = Scene(true_debris=true_debris, sar=sar, optical=optical, true_transform=tt)
     diag["mode"] = mode
     diag["meta"] = bs_optical.meta
+    diag["s1_meta"] = s1_meta
     return scene, diag

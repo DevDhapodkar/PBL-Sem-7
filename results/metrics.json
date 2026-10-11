@@ -36,65 +36,65 @@
       "f1": 0.6666666666666666,
       "precision": 0.6363636363636364,
       "recall": 0.7,
-      "threshold": 0.11077669001133744
+      "threshold": 0.11077669001133736
     },
     "proposed": {
       "f1": 0.7945205479452054,
       "precision": 0.8787878787878788,
       "recall": 0.725,
-      "threshold": 0.12410082760263842
+      "threshold": 0.12410082760263744
     }
   },
   "average_precision_single": {
-    "proposed": 0.81,
+    "proposed": 0.816,
     "traditional_icp": 0.661,
-    "optical_only": 0.745
+    "optical_only": 0.754
   },
   "averaged_benchmark": {
     "optical_only": {
       "precision": [
-        0.744,
-        0.034
+        0.748,
+        0.033
       ],
       "recall": [
-        0.807,
-        0.052
+        0.811,
+        0.049
       ],
       "f1": [
-        0.773,
+        0.777,
         0.031
       ],
-      "ap": 0.742
+      "ap": 0.755
     },
     "traditional_icp": {
       "precision": [
-        0.753,
-        0.27
+        0.793,
+        0.248
       ],
       "recall": [
-        0.285,
-        0.176
+        0.299,
+        0.175
       ],
       "f1": [
-        0.399,
-        0.21
+        0.419,
+        0.206
       ],
-      "ap": 0.638
+      "ap": 0.659
     },
     "proposed": {
       "precision": [
-        0.907,
-        0.094
+        0.925,
+        0.088
       ],
       "recall": [
-        0.515,
+        0.539,
         0.141
       ],
       "f1": [
-        0.649,
-        0.151
+        0.673,
+        0.143
       ],
-      "ap": 0.791
+      "ap": 0.811
     }
   },
   "robustness_sweep": {
@@ -173,6 +173,6 @@
     "match_radius": 20.0,
     "confidence_threshold": 0.3,
     "optical_threshold": 0.5,
-    "trials": 15
+    "trials": 20
   }
 }

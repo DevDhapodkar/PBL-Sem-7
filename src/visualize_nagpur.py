@@ -23,24 +23,26 @@ def true_color(bs):
     return np.dstack([_stretch(bs["B04"]), _stretch(bs["B03"]), _stretch(bs["B02"])])
 
 
-def plot_scene_overview(bs, scene, diag, path=None):
+def plot_scene_overview(bs, scene, diag, path=None, s1_date=None, s2_date=None):
     """True colour + detections, NDWI, and NDVI/FDI floating-matter panels."""
     rgb = true_color(bs)
     fig, ax = plt.subplots(1, 3, figsize=(16.5, 5.6))
     m = bs.meta
+    s2_d = s2_date or m.get("date", "—")
+    s1_d = s1_date or diag.get("s1_meta", {}).get("date", "—")
 
     ax[0].imshow(rgb)
     opt = np.array([d.xy for d in scene.optical]) if scene.optical else np.empty((0, 2))
     sar = np.array([d.xy for d in scene.sar]) if scene.sar else np.empty((0, 2))
     if len(sar):
         ax[0].scatter(sar[:, 0], sar[:, 1], s=22, marker="^", c="#ff3b30",
-                      alpha=.85, label="SAR (S1) detections")
+                      alpha=.85, label=f"SAR (S1: {s1_d}) detections")
     if len(opt):
         ax[0].scatter(opt[:, 0], opt[:, 1], s=22, marker="o",
                       edgecolors="#00e5ff", facecolors="none", linewidths=1.1,
-                      label="optical (S2) detections")
-    ax[0].set_title(f"Sentinel-2 true colour — {m.get('lake','Nagpur lake')}\n"
-                    f"{m.get('date','')}  ·  detections")
+                      label=f"optical (S2: {s2_d}) detections")
+    ax[0].set_title(f"Sentinel-2 ({s2_d}) × Sentinel-1 ({s1_d})\n"
+                    f"{m.get('lake','Nagpur lake')} · detections")
     ax[0].legend(loc="lower right", fontsize=7)
 
     im1 = ax[1].imshow(diag["ndwi"], cmap="RdBu", vmin=-0.6, vmax=0.6)
@@ -85,18 +87,18 @@ def plot_overlay(bs, scene, proposed, path=None, s1_date="?", s2_date="?",
     if len(sar_raw):
         ax[0].scatter(sar_raw[:, 0], sar_raw[:, 1], s=42, marker="^", c="#ff3b30",
                       alpha=.85, label=f"S1 SAR debris ({s1_date})")
-    ax[0].set_title("Raw overlay — debris drifted between passes\n"
-                    "(different acquisition times + co-registration)")
+    ax[0].set_title(f"Raw overlay — debris drifted between passes\n"
+                    f"(S2 {s2_date} vs S1 {s1_date})")
     ax[0].legend(loc="lower right", fontsize=8)
 
     # --- right: after RANSAC+CPD registration ---
     ax[1].imshow(rgb)
     if len(opt):
         ax[1].scatter(opt[:, 0], opt[:, 1], s=45, marker="o", edgecolors="#00e5ff",
-                      facecolors="none", linewidths=1.4, label="S2 optical debris")
+                      facecolors="none", linewidths=1.4, label=f"S2 optical debris ({s2_date})")
     if len(sar_reg):
         ax[1].scatter(sar_reg[:, 0], sar_reg[:, 1], s=42, marker="^", c="#2ca02c",
-                      alpha=.85, label="S1 SAR → registered")
+                      alpha=.85, label=f"S1 SAR registered ({s1_date})")
     # connect corroborated pairs
     n_pair = 0
     for c in proposed.fusion.candidates:
@@ -110,7 +112,7 @@ def plot_overlay(bs, scene, proposed, path=None, s1_date="?", s2_date="?",
 
     for a in ax:
         a.set_xticks([]); a.set_yticks([])
-    fig.suptitle(f"{bs.meta.get('lake','Nagpur lake')} — Sentinel-1 × Sentinel-2 debris "
+    fig.suptitle(f"{bs.meta.get('lake','Nagpur lake')} — Sentinel-1 ({s1_date}) × Sentinel-2 ({s2_date}) debris "
                  f"comparison  ·  D_reg={proposed.fusion.d_registration:.1f}px",
                  fontsize=13, y=0.99)
     fig.tight_layout(rect=[0, 0, 1, 0.90])

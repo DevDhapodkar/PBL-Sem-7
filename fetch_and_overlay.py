@@ -74,8 +74,8 @@ def _get_s1(mode, lake, bs, opt_dets, water, seed):
             from src.acquire import fetch_latest_s1_pc
             bs_sar = fetch_latest_s1_pc(lake, bs)
             sar = detect_sar_backscatter(bs_sar, water)
-            print(f"  Sentinel-1 (SAR):     {bs_sar.meta['scene']}  "
-                  f"{bs_sar.meta['date']}  [Planetary Computer, live]  "
+            print(f"  Sentinel-1 (SAR):     {bs_sar.meta['scene']}")
+            print(f"  Sentinel-1 SAR date:  {bs_sar.meta['date']}  [Planetary Computer, live]  "
                   f"-> {len(sar)} detections")
             return sar, {"matrix_sar_to_opt": np.eye(3), "note": "live S1"}, bs_sar.meta
         except Exception as e:
@@ -85,9 +85,9 @@ def _get_s1(mode, lake, bs, opt_dets, water, seed):
             print("  -> falling back to S1 derived from the real optical scene.")
     sar, tt, _ = simulate_sar_pointset(opt_dets, water, seed=seed)
     meta = {"source": "Sentinel-1 (simulated from real optical)",
-            "date": "n/a (stand-in)", "scene": "derived"}
-    print(f"  Sentinel-1 (SAR):     derived from optical [offline stand-in]  "
-          f"-> {len(sar)} detections")
+            "date": "Simulated stand-in", "scene": "derived", "live": False}
+    print(f"  Sentinel-1 (SAR):     derived from optical [offline stand-in]")
+    print(f"  Sentinel-1 SAR date:  {meta['date']}  -> {len(sar)} detections")
     return sar, tt, meta
 
 

@@ -92,7 +92,25 @@ def load_cached_s2(lake_key: str) -> BandStack | None:
             meta = {"raw": str(d["meta"][0])}
     meta.setdefault("live", True)
     meta["cached"] = True
-    return BandStack(bands, transform=None, crs=UTM_EPSG, meta=meta)
+
+    # Georeference the cached window if lake coordinates are known
+    transform = None
+    try:
+        from .nagpur import LAKES, UTM_EPSG
+        lake = LAKES.get(lake_key)
+        if lake is not None and bands:
+            import rasterio.transform
+            from pyproj import Transformer
+            tr = Transformer.from_crs("EPSG:4326", UTM_EPSG, always_xy=True)
+            cx, cy = tr.transform(lake.lon, lake.lat)
+            h = lake.half_m
+            first_band = next(iter(bands.values()))
+            H, W = first_band.shape
+            transform = rasterio.transform.from_bounds(cx - h, cy - h, cx + h, cy + h, W, H)
+    except Exception:
+        pass
+
+    return BandStack(bands, transform=transform, crs=UTM_EPSG, meta=meta)
 
 
 def get_nagpur_s2(lake, year: int = 2024, month: int = 1,
@@ -187,23 +205,133 @@ def fetch_sentinel2(
                            "lake": lake.name, "live": True})
 
 
-def fetch_latest_clear_s2(
+def fetch_latest_s2_pc(
+    lake: Lake,
+    max_cloud: float = 0.25,
+    months_back: int = 14,
+    bands: tuple[str, ...] = _S2_BANDS,
+    start=None,
+) -> BandStack:
+    """
+    Fetch the **most recent low-cloud** Sentinel-2 L2A scene over ``lake`` from
+    Microsoft Planetary Computer STAC catalog (fast, indexed by cloud-cover, signed COGs).
+    """
+    import datetime as _dt
+    import planetary_computer as pc
+    from pystac_client import Client
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import from_bounds
+    from pyproj import Transformer
+
+    tr = Transformer.from_crs("EPSG:4326", UTM_EPSG, always_xy=True)
+    cx, cy = tr.transform(lake.lon, lake.lat)
+    h = lake.half_m
+    box = (cx - h, cy - h, cx + h, cy + h)
+    bbox = _to_lonlat_box(UTM_EPSG, box)
+
+    today = start or _dt.date.today()
+    since = (today - _dt.timedelta(days=31 * months_back)).isoformat()
+
+    cat = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
+                      modifier=pc.sign_inplace)
+
+    # Search with ascending cloud tolerance tiers to find the newest clear scene
+    tolerances = [max_cloud, min(max_cloud * 1.5, 0.40), 0.65]
+    items = []
+    for tol in tolerances:
+        try:
+            search = cat.search(
+                collections=["sentinel-2-l2a"],
+                bbox=bbox,
+                datetime=f"{since}/{today.isoformat()}",
+                query={"eo:cloud_cover": {"lt": float(tol * 100)}},
+                sortby=[{"field": "datetime", "direction": "desc"}],
+                max_items=12,
+            )
+            items = list(search.items())
+            if items:
+                break
+        except Exception:
+            continue
+
+    if not items:
+        search = cat.search(
+            collections=["sentinel-2-l2a"],
+            bbox=bbox,
+            datetime=f"{since}/{today.isoformat()}",
+            sortby=[{"field": "datetime", "direction": "desc"}],
+            max_items=10,
+        )
+        items = list(search.items())
+
+    if not items:
+        raise RuntimeError(f"no Sentinel-2 L2A scenes found over {lake.name} on Planetary Computer.")
+
+    # Probe candidates for valid non-empty window over the lake
+    chosen = None
+    for it in items:
+        try:
+            if "B03" not in it.assets:
+                continue
+            with rasterio.open(it.assets["B03"].href) as ds:
+                win = from_bounds(*box, ds.transform)
+                probe = ds.read(1, window=win)
+                if probe.size > 0 and (probe > 0).mean() >= 0.90:
+                    chosen = it
+                    break
+        except Exception:
+            continue
+
+    if chosen is None:
+        chosen = items[0]
+
+    out: dict[str, np.ndarray] = {}
+    ref_shape = ref_tr = ref_crs = None
+    for b in bands:
+        if b not in chosen.assets:
+            continue
+        with rasterio.open(chosen.assets[b].href) as ds:
+            win = from_bounds(*box, ds.transform)
+            if ref_shape is None:
+                arr = ds.read(1, window=win, out_dtype="float32")
+                ref_shape = arr.shape
+                ref_tr = ds.window_transform(win)
+                ref_crs = str(ds.crs)
+            else:
+                arr = ds.read(1, window=win, out_dtype="float32",
+                              out_shape=ref_shape, resampling=Resampling.nearest)
+            out[b] = arr / 10000.0
+
+    date_str = str(chosen.datetime.date())
+    cloud_pct = chosen.properties.get("eo:cloud_cover")
+    cloud_str = f"{cloud_pct:.1f}%" if cloud_pct is not None else "unknown"
+
+    return BandStack(
+        out, ref_tr, ref_crs,
+        meta={
+            "source": "Sentinel-2 L2A (Planetary Computer)",
+            "tile": S2_TILE,
+            "scene": chosen.id,
+            "date": date_str,
+            "datetime": chosen.datetime.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "cloud_cover": cloud_str,
+            "lake": lake.name,
+            "live": True,
+            "utm_box": box,
+        },
+    )
+
+
+def fetch_latest_clear_s2_aws(
     lake: Lake,
     max_cloud: float = 0.10,
     months_back: int = 14,
     bands: tuple[str, ...] = _S2_BANDS,
     start=None,
 ) -> BandStack:
-    """
-    Fetch the **most recent low-cloud** Sentinel-2 L2A scene over ``lake``.
-
-    Scans scenes backwards from ``start`` (default: today), reads the L2A **Scene
-    Classification (SCL)** band over the lake window, and returns the newest scene
-    whose cloud fraction (SCL ∈ {cloud-shadow, cloud-med, cloud-high, cirrus}) is
-    below ``max_cloud``. This is the "most recent clear photo" the debris plot uses.
-    """
+    """Fetch recent low-cloud Sentinel-2 L2A scene via public AWS sentinel-cogs."""
     import datetime as _dt
-
     import rasterio
     from rasterio.enums import Resampling
     from rasterio.windows import from_bounds
@@ -216,8 +344,8 @@ def fetch_latest_clear_s2(
     box = (cx - h, cy - h, cx + h, cy + h)
 
     today = start or _dt.date.today()
-    ym = [( (today.replace(day=1) - _dt.timedelta(days=31 * i)).year,
-            (today.replace(day=1) - _dt.timedelta(days=31 * i)).month )
+    ym = [((today.replace(day=1) - _dt.timedelta(days=31 * i)).year,
+           (today.replace(day=1) - _dt.timedelta(days=31 * i)).month)
           for i in range(months_back)]
     cand = []
     for y, m in ym:
@@ -230,20 +358,20 @@ def fetch_latest_clear_s2(
 
     CLOUD = {3, 8, 9, 10}
     chosen = None
-    for sc in cand:
+    for sc in cand[:15]:
         try:
             with rasterio.open(f"{S2_BUCKET}/{sc}SCL.tif") as ds:
                 scl = ds.read(1, window=from_bounds(*box, ds.transform))
         except Exception:
             continue
-        if scl.size == 0 or (scl > 0).mean() < 0.9:      # nodata / partial
+        if scl.size == 0 or (scl > 0).mean() < 0.9:
             continue
         if np.isin(scl, list(CLOUD)).mean() <= max_cloud:
             chosen = sc
             break
     if chosen is None:
         raise RuntimeError(f"no clear (<{max_cloud:.0%} cloud) S2 scene for "
-                           f"{lake.name} in the last {months_back} months.")
+                           f"{lake.name} in the last {months_back} months on AWS.")
 
     out, ref_shape, ref_tr, ref_crs = {}, None, None, None
     for b in bands:
@@ -262,6 +390,27 @@ def fetch_latest_clear_s2(
                            "tile": S2_TILE, "scene": chosen.split("/")[-2],
                            "date": f"{date[:4]}-{date[4:6]}-{date[6:]}",
                            "lake": lake.name, "live": True, "utm_box": box})
+
+
+def fetch_latest_clear_s2(
+    lake: Lake,
+    max_cloud: float = 0.25,
+    months_back: int = 14,
+    bands: tuple[str, ...] = _S2_BANDS,
+    start=None,
+) -> BandStack:
+    """
+    Fetch the **most recent low-cloud** Sentinel-2 L2A scene over ``lake``.
+
+    Tries Microsoft Planetary Computer STAC first (fast, metadata-filtered, signed COGs),
+    falling back to AWS S3 sentinel-cogs if Planetary Computer is unavailable.
+    """
+    try:
+        return fetch_latest_s2_pc(lake, max_cloud=max_cloud, months_back=months_back,
+                                   bands=bands, start=start)
+    except Exception:
+        return fetch_latest_clear_s2_aws(lake, max_cloud=0.10, months_back=months_back,
+                                         bands=bands, start=start)
 
 
 # ---------------------------------------------------------------------------
@@ -335,10 +484,35 @@ def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
 
     cat = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1",
                       modifier=pc.sign_inplace)
-    search = cat.search(collections=["sentinel-1-rtc"], bbox=tr_inv,
-                        datetime=f"{since}/{today.isoformat()}",
-                        sortby=[{"field": "datetime", "direction": "desc"}])
-    items = list(search.items())
+
+    # Check for target date from the optical reference to pair co-temporally
+    target_dt = None
+    if ref.meta.get("date") and ref.meta.get("date") != "—":
+        try:
+            target_dt = _dt.date.fromisoformat(ref.meta["date"])
+        except Exception:
+            pass
+
+    items = []
+    if target_dt is not None:
+        # Search co-temporal window around the optical observation date (±25 days)
+        start_d = (target_dt - _dt.timedelta(days=25)).isoformat()
+        end_d = min(today, target_dt + _dt.timedelta(days=25)).isoformat()
+        try:
+            search = cat.search(collections=["sentinel-1-rtc"], bbox=tr_inv,
+                                datetime=f"{start_d}/{end_d}")
+            items = list(search.items())
+            if items:
+                items.sort(key=lambda it: abs((it.datetime.date() - target_dt).days))
+        except Exception:
+            items = []
+
+    if not items:
+        search = cat.search(collections=["sentinel-1-rtc"], bbox=tr_inv,
+                            datetime=f"{since}/{today.isoformat()}",
+                            sortby=[{"field": "datetime", "direction": "desc"}])
+        items = list(search.items())
+
     if not items:
         raise RuntimeError("no recent Sentinel-1 RTC over this lake on PC.")
     item = items[0]
@@ -366,6 +540,8 @@ def fetch_latest_s1_pc(lake: Lake, ref: BandStack, months_back: int = 3,
     return BandStack(dst_bands, ref.transform, ref.crs,
                      meta={"source": "Sentinel-1 RTC (Planetary Computer)",
                            "date": str(item.datetime.date()),
+                           "datetime": item.datetime.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                           "search_window": f"{since} to {today.isoformat()}",
                            "scene": item.id, "lake": lake.name, "live": True})
 
 
