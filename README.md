@@ -22,10 +22,12 @@ benchmarked against the traditional ICP method and single-sensor optical baselin
 7. [The interactive dashboard (screenshots & modes)](#7-the-interactive-dashboard-screenshots--modes)
 8. [Evaluation protocol & benchmark results](#8-evaluation-protocol--benchmark-results)
 9. [Conclusions](#9-conclusions)
-10. [Quick start](#10-quick-start)
-11. [Repository layout](#11-repository-layout)
-12. [Limitations & future work](#12-limitations--future-work)
-13. [References](#13-references)
+10. [Essential tools, technologies & software](#10-essential-tools-technologies--software)
+11. [Step-by-step execution & usage instructions](#11-step-by-step-execution--usage-instructions)
+12. [Repository layout & sample dataset](#12-repository-layout--sample-dataset)
+13. [Submission packaging instructions](#13-submission-packaging-instructions)
+14. [Limitations & future work](#14-limitations--future-work)
+15. [References](#15-references)
 
 ---
 
@@ -339,111 +341,208 @@ an honest prior-art plan in [`docs/NOVELTY.md`](docs/NOVELTY.md).
 
 ---
 
-## 10. Quick start
+## 10. Essential tools, technologies & software
 
-### Zero-setup: run the fully-real S1×S2 overlay in Google Colab ⭐
+The project is built on an open-source, reproducible scientific Python stack without proprietary GIS software dependencies.
 
-The easiest way to get the **fully-real Sentinel-1 × Sentinel-2** result (real SAR
-included) with no local install:
+| Category | Tool / Technology / Library | Version | Role & Project Purpose |
+|----------|-----------------------------|---------|------------------------|
+| **Language & Runtime** | **Python** | `>= 3.9` (tested 3.11) | Core development language for pipeline logic, numerical algorithms, and web app. |
+| **Interactive Dashboard** | **Streamlit** | `>= 1.30` | Interactive web dashboard ([`app.py`](app.py)) with dual operating modes (real Sentinel-2 lake data and synthetic simulation), real-time parameter tuning, reactive metrics, and scorecards. |
+| **Geospatial & Remote Sensing** | **Rasterio** | `>= 1.3` | High-performance raster I/O built on GDAL. Streams Sentinel-2 Cloud-Optimized GeoTIFFs (COGs) over HTTP range requests (`/vsicurl`) without full tile downloads. |
+| | **PyProj** | `>= 3.4` | Coordinate reference system (CRS) projections and transformations between WGS84 Geographic Lat/Lon (`EPSG:4326`) and UTM Zone 44N (`EPSG:32644`). |
+| | **RioXarray** | `>= 0.15` | Geospatial xarray extension used to reproject, crop, and resample Sentinel-1 SAR backscatter grids directly onto Sentinel-2 10 m grids. |
+| | **PySTAC-Client** | `>= 0.7` | STAC API client to query satellite collections (e.g., `sentinel-1-rtc` on Microsoft Planetary Computer). |
+| | **Planetary-Computer** | `>= 1.0` | Microsoft Planetary Computer Python SDK for anonymous token signing of open SAR assets. |
+| **Scientific Computing & Math** | **NumPy** | `>= 1.24` | Vectorized multidimensional array math, spectral index computation, coordinate transformations, and matrix operations. |
+| | **SciPy** | `>= 1.10` | `scipy.spatial.cKDTree` for spatial mutual-nearest-neighbor lookups, morphology filters, distance transforms, and numerical optimization. |
+| **Point Registration & Core Algorithms** | *Custom Implementations* | In-repo ([`src/`](src/)) | • **RANSAC + Umeyama SVD**: Gross outlier rejection and coarse similarity registration ($T_0$).<br/>• **Coherent Point Drift (CPD)**: Rigid Expectation-Maximization point alignment with uniform outlier distribution ($w$).<br/>• **ICP Baseline**: Classical iterative closest point for direct comparative ablation.<br/>• **CFAR Detector**: Constant False Alarm Rate radar anomaly detection on water surfaces.<br/>• **Spectral Indices**: NDWI water segmentation + NDVI/FDI floating macro-matter detectors. |
+| **Data Visualization** | **Matplotlib** | `>= 3.6` | Generation of publication-quality multi-panel spectral plots, RGB composites, PR curves, confidence overlays, and registration scatter graphs. |
+| **Container & Cloud Hosting** | **Docker** & **Cloud Run / Streamlit Cloud** | Dockerfile included | Containerized deployment configuration for Google Cloud Run and cloud hosting on Streamlit Community Cloud. |
 
-**[▶ Open in Colab](https://colab.research.google.com/github/DevDhapodkar/PBL-Sem-7/blob/claude/sentinel-debris-detection-m17syi/notebooks/nagpur_debris_colab.ipynb)**
- — then *Runtime → Run all*.
+---
 
-Colab runs in Google's cloud, where the Sentinel data hosts (incl. Microsoft
-Planetary Computer for real Sentinel-1) are reachable, so it fetches the latest
-real S1 and the most-recent-clear real S2 over your chosen Nagpur lake and draws
-the drift-aware overlay — no credentials needed.
+## 11. Step-by-step execution & usage instructions
 
-### Run on your machine — one command
+### Option A: Zero-setup execution in Google Colab ⭐
 
-You need **Python 3.9+** installed ([python.org](https://www.python.org/downloads/);
-on Windows tick *"Add Python to PATH"*). Then:
+The easiest way to run the full Sentinel-1 × Sentinel-2 pipeline with live satellite imagery and zero local setup:
 
+1. Open the interactive Colab notebook:  
+   **[▶ Open in Google Colab](https://colab.research.google.com/github/DevDhapodkar/PBL-Sem-7/blob/claude/sentinel-debris-detection-m17syi/notebooks/nagpur_debris_colab.ipynb)**
+2. In the top menu, select **Runtime** $\rightarrow$ **Run all**.
+3. The notebook will automatically install dependencies, fetch the latest passes over your selected Nagpur lake, and render the drift-corrected overlay.
+
+---
+
+### Option B: One-command automated execution (Local)
+
+The repository includes cross-platform launcher scripts that automate virtual environment creation, dependency installation, and application startup in one step.
+
+#### On macOS / Linux:
 ```bash
 git clone https://github.com/DevDhapodkar/PBL-Sem-7.git
 cd PBL-Sem-7
-git checkout claude/sentinel-debris-detection-m17syi
+chmod +x run.sh
+./run.sh            # Sets up .venv, installs requirements, launches Streamlit
 ```
 
-**macOS / Linux:**
-```bash
-./run.sh            # creates a venv, installs deps, launches the dashboard
-```
-
-**Windows** (double-click `run.bat`, or in Command Prompt):
+#### On Windows:
+Double-click `run.bat` or run in Command Prompt:
 ```bat
+git clone https://github.com/DevDhapodkar/PBL-Sem-7.git
+cd PBL-Sem-7
 run.bat
 ```
 
-The launcher sets up an isolated virtual environment, installs everything on the
-first run (~1–2 min), and starts the dashboard. **Open the `Local URL` it prints —
-usually http://localhost:8501 — in your browser.** Press `Ctrl+C` to stop.
-
-Other modes: `./run.sh demo` (batch benchmark) · `./run.sh test` (tests)
-— on Windows, `run.bat demo` / `run.bat test`.
-
-**Latest S1 × S2 debris overlay** (most-recent clear Sentinel-2 + latest Sentinel-1):
-
-```bash
-python fetch_and_overlay.py --lake ambazari            # auto S1 (real if reachable)
-python fetch_and_overlay.py --lake gorewada --s1 pc    # force real S1 (Planetary Computer)
-```
-
-### Manual (if you prefer)
-
-```bash
-pip install -r requirements.txt          # numpy, scipy, matplotlib, streamlit, rasterio, pyproj, pystac-client, planetary-computer, rioxarray
-
-streamlit run app.py                     # ⭐ dashboard (Nagpur real S2 + Simulation modes)
-python run_demo.py                       # controlled benchmark → results/ (figures + metrics.json)
-python tests/test_pipeline.py            # unit / integration tests
-```
-
-Fetch a **fresh live** Sentinel-2 scene for any lake (bypassing the bundled cache):
-
-```python
-from src.nagpur import get_lake
-from src.acquire import fetch_sentinel2
-bs = fetch_sentinel2(get_lake("gorewada"), year=2024, month=3)   # reads the public COG bucket
-print(bs.meta)          # {'scene': 'S2A_44QKJ_...', 'date': '2024-03-..', 'live': True, ...}
-```
-
-For **live Sentinel-1** via Planetary Computer or Earth Engine, see [`docs/DATA.md`](docs/DATA.md).
+Open the browser at `http://localhost:8501`.
 
 ---
 
-## 11. Repository layout
+### Option C: Step-by-step manual execution
 
+If you prefer executing each step manually via the terminal:
+
+#### Step 1: Clone the repository and navigate into it
+```bash
+git clone https://github.com/DevDhapodkar/PBL-Sem-7.git
+cd PBL-Sem-7
+```
+
+#### Step 2: Create and activate a Python virtual environment
+```bash
+# On macOS / Linux:
+python3 -m venv .venv
+source .venv/bin/activate
+
+# On Windows:
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+#### Step 3: Install dependencies
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### Step 4: Launch the interactive Streamlit dashboard
+```bash
+streamlit run app.py
+```
+Open **http://localhost:8501** in your web browser. You can toggle between:
+- **Nagpur — real Sentinel-2 mode**: Select any of the 5 Nagpur lakes, toggle between live and bundled data, adjust detection/confidence thresholds, and inspect registration, confidence, and comparison tabs.
+- **Simulation mode**: Stress-test the pipeline against controlled clutter, mis-registration, and varying debris counts.
+
+#### Step 5: Run the reproducible benchmark suite
+```bash
+python run_demo.py
+```
+This runs the full ablation against traditional ICP and optical-only baselines, outputs quantitative metrics, and saves benchmark figures into the `results/` directory (`metrics.json`, `01_registration.png`, `02_confidence.png`, `03_precision_recall.png`, `04_robustness.png`).
+
+#### Step 6: Run the unit & integration tests
+```bash
+python tests/test_pipeline.py
+```
+Runs 11 test suites verifying CPD alignment, RANSAC outlier rejection, Umeyama similarity estimation, fusion confidence gating, and real Sentinel-2/Sentinel-1 pipelines.
+
+#### Step 7: (Optional) Generate CLI drift-corrected overlay
+```bash
+# Fetch latest clear optical pass and pair with Sentinel-1:
+python fetch_and_overlay.py --lake ambazari
+```
+
+---
+
+## 12. Repository layout & sample dataset
+
+### Complete repository structure
 ```text
-src/
-  nagpur.py            Nagpur lake AOIs + Sentinel-2 tile (44QKJ) constants
-  acquire.py           live Sentinel-2 (AWS COG) + Sentinel-1 (Planetary Computer RTC & Earth Engine); cache loader
-  detect_real.py       real detectors: NDWI water mask, NDVI/FDI floating matter, CFAR SAR anomaly -> point sets
-  detection.py         generic detector interface (Detection records)
-  data_simulation.py   synthetic S1/S2 scenes for controlled testing
-  registration.py      RANSAC, CPD (rigid EM), ICP, Umeyama SVD, spatial Mutual-NN & shape-context matching
-  fusion.py            cross-modal validation + registration-gated confidence C
-  pipeline.py          proposed pipeline: RANSAC -> CPD -> fusion
-  baseline.py          traditional (ICP) and optical-only baselines
-  evaluate.py          KD-tree greedy matching, precision/recall/F1, PR curves, average precision
-  visualize.py         pipeline & benchmark figures
-  visualize_nagpur.py  real-data (lake imagery, spectral indices, drift overlays) figures
-data/                  bundled REAL Sentinel-2 scenes for 5 Nagpur lakes (offline-safe)
-notebooks/             zero-setup Google Colab notebook for live S1×S2 overlay
-app.py                 interactive Streamlit dashboard (Nagpur real S2 + Simulation)
-fetch_and_overlay.py   CLI script for latest-S1 × latest-clear-S2 drift-corrected overlay
-run_demo.py            controlled benchmark + clutter-robustness sweep
-tests/test_pipeline.py unit / integration test suite
-docs/
-  METHODOLOGY.md       algorithms + confidence function in detail
-  NOVELTY.md           novelty claim + prior-art plan and preliminary findings
-  DATA.md              data-acquisition guide (S2 COG bucket, S1 via Planetary Computer & Earth Engine)
-  img/                 README figures & dashboard screenshots
+.
+├── README.md                      # Comprehensive technical documentation, equations & execution guide
+├── requirements.txt               # Pinned Python package dependencies
+├── run.sh                         # macOS/Linux automated launcher
+├── run.bat                        # Windows automated launcher
+├── Dockerfile                     # Docker container specification (Cloud Run deployment)
+├── .dockerignore                  # Docker exclusion rules
+├── app.py                         # Main interactive Streamlit application
+├── run_demo.py                    # Controlled benchmark script (generates results/)
+├── fetch_and_overlay.py           # CLI tool for latest-pass S1 x S2 drift-aware overlay
+├── data/                          # BUNDLED SAMPLE DATASET (Offline-safe, ~1.2 MB total)
+│   ├── nagpur_ambazari_s2.npz     # Ambazari Lake Sentinel-2 L2A multispectral window (~336 KB)
+│   ├── nagpur_futala_s2.npz       # Futala Lake Sentinel-2 L2A multispectral window (~172 KB)
+│   ├── nagpur_gandhisagar_s2.npz  # Gandhisagar Tank Sentinel-2 L2A multispectral window (~89 KB)
+│   ├── nagpur_gorewada_s2.npz     # Gorewada Reservoir Sentinel-2 L2A multispectral window (~428 KB)
+│   └── nagpur_sonegaon_s2.npz     # Sonegaon Lake Sentinel-2 L2A multispectral window (~175 KB)
+├── src/                           # Implemented source code modules
+│   ├── __init__.py                # Package initialization
+│   ├── nagpur.py                  # Nagpur lake bounding boxes, UTM 44N projection constants
+│   ├── acquire.py                 # Live Sentinel-2 (AWS COG) & Sentinel-1 (PC STAC / GEE) data client
+│   ├── detect_real.py             # NDWI water segmentation, NDVI/FDI cue detectors & CFAR anomaly
+│   ├── detection.py               # Generic Detection dataclass & interface
+│   ├── data_simulation.py         # Synthetic multi-sensor scene generator for controlled testing
+│   ├── registration.py            # RANSAC, CPD (rigid EM), ICP, Umeyama SVD, and spatial matching
+│   ├── fusion.py                  # Cross-modal validation & registration-gated confidence C
+│   ├── pipeline.py                # End-to-end proposed pipeline (RANSAC -> CPD -> Fusion)
+│   ├── baseline.py                # Traditional (ICP) and single-modality (optical-only) baselines
+│   ├── evaluate.py                # KDTree greedy matching, PR curves, F1, Average Precision (AP)
+│   ├── visualize.py               # Benchmark plotting routines (registration, confidence, PR curves)
+│   └── visualize_nagpur.py        # Real lake visualization (RGB, NDWI, NDVI/FDI, drift overlays)
+├── results/                       # Generated benchmark outputs & evaluation figures
+│   ├── metrics.json               # Quantitative benchmark metrics
+│   ├── 01_registration.png        # Registration comparison plot
+│   ├── 02_confidence.png          # Confidence map plot
+│   ├── 03_precision_recall.png    # Precision-Recall curves
+│   └── 04_robustness.png          # Clutter robustness comparison
+├── docs/                          # Detailed technical specifications & methodology
+│   ├── METHODOLOGY.md             # Detailed mathematical formulations and algorithms
+│   ├── NOVELTY.md                 # Prior-art analysis and novelty framework
+│   ├── DATA.md                    # Data acquisition guide
+│   └── img/                       # Documentation and README diagrams
+├── tests/
+│   └── test_pipeline.py           # 11 unit & integration test suites
+└── notebooks/
+    └── nagpur_debris_colab.ipynb  # Zero-setup Google Colab notebook
 ```
+
+### Sample dataset details (Lightweight & Self-Contained)
+
+To guarantee that the project can be evaluated immediately without downloading gigabytes of satellite tiles or requiring external cloud credentials, a **compact sample dataset** is pre-bundled in the [`data/`](data/) folder:
+
+| Sample Data File | Lake Covered | Dimensions | File Size | Bands Included |
+|------------------|--------------|:----------:|:---------:|----------------|
+| `nagpur_ambazari_s2.npz` | Ambazari Lake | $220 \times 220$ | **336 KB** | `B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL` |
+| `nagpur_gorewada_s2.npz` | Gorewada Lake | $200 \times 200$ | **428 KB** | `B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL` |
+| `nagpur_futala_s2.npz` | Futala Lake | $110 \times 110$ | **172 KB** | `B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL` |
+| `nagpur_sonegaon_s2.npz` | Sonegaon Lake | $90 \times 90$ | **175 KB** | `B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL` |
+| `nagpur_gandhisagar_s2.npz` | Gandhisagar Lake | $90 \times 90$ | **89 KB** | `B02`, `B03`, `B04`, `B06`, `B08`, `B11`, `SCL` |
+| **Total Sample Dataset Size** | **All 5 Water Bodies** | — | **~1.2 MB** | *Zero external downloads required* |
+
+Each `.npz` archive contains genuine Copernicus Sentinel-2 L2A surface reflectance arrays cropped to the lake bounds, geo-referenced in UTM 44N, and paired with acquisition metadata.
 
 ---
 
-## 12. Limitations & future work
+## 13. Submission packaging instructions
+
+When submitting the project as a ZIP archive, **do not include virtual environment directories (`.venv/`) or git history (`.git/`)**, as these inflate file size by hundreds of megabytes.
+
+To create an optimized, compliant submission ZIP (~7 MB in size) containing all source code, documentation, and the sample dataset:
+
+#### On macOS / Linux:
+```bash
+zip -r PBL_Sem7_Debris_Detection.zip . -x "./.venv/*" "./.git/*" "./.agents/*" "./.claude/*" "*__pycache__*" "*.DS_Store*"
+```
+
+#### On Windows (PowerShell):
+```powershell
+Compress-Archive -Path app.py, run_demo.py, fetch_and_overlay.py, requirements.txt, run.sh, run.bat, Dockerfile, README.md, data, src, results, docs, tests, notebooks -DestinationPath PBL_Sem7_Debris_Detection.zip
+```
+
+The resulting archive is approximately **7 MB**, contains all source code and sample data, and is ready for submission.
+
+---
+
+## 14. Limitations & future work
 
 * **No field-validated debris labels on live passes.** In live S1+S2 mode, the system validates cross-sensor corroboration and estimates drift, whereas quantitative PR curves rely on the derived stand-in or synthetic ground truth. Future work should validate against in-situ Nagpur lake surveys or annotated benchmarks (e.g. MARIDA).
 * **Detectors are index-threshold based.** NDWI/NDVI/FDI and CFAR thresholds are literature defaults; a learned segmentation model (Random Forest / U-Net) would improve candidate generation prior to point-set registration.
