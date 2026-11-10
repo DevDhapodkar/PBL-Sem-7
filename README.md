@@ -468,6 +468,7 @@ python fetch_and_overlay.py --lake ambazari
 ├── app.py                         # Main interactive Streamlit application
 ├── run_demo.py                    # Controlled benchmark script (generates results/)
 ├── fetch_and_overlay.py           # CLI tool for latest-pass S1 x S2 drift-aware overlay
+├── project_poster.jpg            # Academic project poster graphic (SAR x Optical multi-temporal workflow)
 ├── data/                          # BUNDLED SAMPLE DATASET (Offline-safe, ~1.2 MB total)
 │   ├── nagpur_ambazari_s2.npz     # Ambazari Lake Sentinel-2 L2A multispectral window (~336 KB)
 │   ├── nagpur_futala_s2.npz       # Futala Lake Sentinel-2 L2A multispectral window (~172 KB)
